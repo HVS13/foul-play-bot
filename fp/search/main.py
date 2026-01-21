@@ -16,7 +16,9 @@ from fp.search.poke_engine_helpers import battle_to_poke_engine_state
 logger = logging.getLogger(__name__)
 
 
-def select_move_from_mcts_results(mcts_results: list[(MctsResult, float, int)]) -> str:
+def compute_final_policy(
+    mcts_results: list[(MctsResult, float, int)]
+) -> list[tuple[str, float]]:
     final_policy = {}
     for mcts_result, sample_chance, index in mcts_results:
         this_policy = max(mcts_result.side_one, key=lambda x: x.visits)
@@ -34,17 +36,31 @@ def select_move_from_mcts_results(mcts_results: list[(MctsResult, float, int)]) 
                 s1_option.move_choice, 0
             ) + (sample_chance * (s1_option.visits / mcts_result.total_visits))
 
-    final_policy = sorted(final_policy.items(), key=lambda x: x[1], reverse=True)
+    return sorted(final_policy.items(), key=lambda x: x[1], reverse=True)
+
+
+def select_move_from_policy(final_policy: list[tuple[str, float]]) -> str:
+    if not final_policy:
+        raise ValueError("No moves available from MCTS results")
 
     # Consider all moves that are close to the best move
     highest_percentage = final_policy[0][1]
-    final_policy = [i for i in final_policy if i[1] >= highest_percentage * 0.75]
+    considered_choices = [
+        i for i in final_policy if i[1] >= highest_percentage * 0.75
+    ]
     logger.info("Considered Choices:")
-    for i, policy in enumerate(final_policy):
-        logger.info(f"\t{round(policy[1] * 100, 3)}%: {policy[0]}")
+    for i, policy in enumerate(considered_choices):
+        logger.info("\t{}%: {}".format(round(policy[1] * 100, 3), policy[0]))
 
-    choice = random.choices(final_policy, weights=[p[1] for p in final_policy])[0]
+    choice = random.choices(
+        considered_choices, weights=[p[1] for p in considered_choices]
+    )[0]
     return choice[0]
+
+
+def select_move_from_mcts_results(mcts_results: list[(MctsResult, float, int)]) -> str:
+    final_policy = compute_final_policy(mcts_results)
+    return select_move_from_policy(final_policy)
 
 
 def get_result_from_mcts(state: str, search_time_ms: int, index: int) -> MctsResult:
@@ -100,7 +116,7 @@ def search_time_num_battles_standard_battle(battle):
         return FoulPlayConfig.parallelism, FoulPlayConfig.search_time_ms
 
 
-def find_best_move(battle: Battle) -> str:
+def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, float]]]:
     battle = deepcopy(battle)
     if battle.team_preview:
         battle.user.active = battle.user.reserve.pop(0)
@@ -140,6 +156,12 @@ def find_best_move(battle: Battle) -> str:
             futures.append((fut, chance, index))
 
     mcts_results = [(fut.result(), chance, index) for (fut, chance, index) in futures]
-    choice = select_move_from_mcts_results(mcts_results)
+    final_policy = compute_final_policy(mcts_results)
+    choice = select_move_from_policy(final_policy)
     logger.info("Choice: {}".format(choice))
+    return choice, final_policy
+
+
+def find_best_move(battle: Battle) -> str:
+    choice, _ = find_best_move_with_policy(battle)
     return choice

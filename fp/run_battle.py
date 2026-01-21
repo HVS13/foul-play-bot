@@ -10,13 +10,25 @@ import constants
 from constants import BattleType
 from config import FoulPlayConfig, SaveReplay
 from fp.battle import LastUsedMove, Pokemon, Battle
-from fp.battle_modifier import async_update_battle, process_battle_updates
+from fp.battle_modifier import async_update_battle, process_battle_updates, update_battle
 from fp.helpers import normalize_name
-from fp.search.main import find_best_move
+from fp.search.main import find_best_move, find_best_move_with_policy
 
 from fp.websocket_client import PSWebsocketClient
 
 logger = logging.getLogger(__name__)
+
+
+def log_suggested_moves(policy, limit=3):
+    if not policy:
+        logger.info("Suggested moves: <none>")
+        return
+
+    logger.info(
+        "Suggested moves (top {}, ordered by policy weight):".format(limit)
+    )
+    for move, weight in policy[:limit]:
+        logger.info("\t{}%: {}".format(round(weight * 100, 3), move))
 
 
 def format_decision(battle, decision):
@@ -78,19 +90,89 @@ def extract_battle_factory_tier_from_msg(msg):
     return normalize_name(tier_name)
 
 
-async def async_pick_move(battle):
+def _extract_battle_room_id(msg_lines):
+    if not msg_lines:
+        return None
+    first_line = msg_lines[0].strip()
+    if first_line.startswith(">"):
+        room_id = first_line[1:].strip()
+        if room_id.startswith("battle-"):
+            return room_id
+    return None
+
+
+def _extract_request_json(msg_lines):
+    for line in msg_lines:
+        split_line = line.split("|")
+        if (
+            len(split_line) >= 3
+            and split_line[1].strip() == "request"
+            and split_line[2].strip()
+        ):
+            return json.loads(split_line[2].strip("'"))
+    return None
+
+
+def _collect_player_map(msg_lines, player_map):
+    for line in msg_lines:
+        if line.startswith("|player|"):
+            split_line = line.split("|")
+            if len(split_line) >= 4:
+                player_map[split_line[2]] = split_line[3]
+
+
+def _collect_known_pokemon(msg_lines, known_pkmn_names):
+    for line in msg_lines:
+        split_line = line.split("|")
+        if len(split_line) < 2:
+            continue
+        action = split_line[1].strip()
+        if action in {"poke", "switch", "drag", "replace", "detailschange"}:
+            if len(split_line) >= 4:
+                pkmn_name = normalize_name(split_line[3].split(",")[0])
+                if pkmn_name:
+                    known_pkmn_names.add(pkmn_name)
+
+
+def _collect_battle_factory_tier(msg_lines):
+    for line in msg_lines:
+        if "Battle Factory Tier:" in line:
+            return extract_battle_factory_tier_from_msg(line)
+    return None
+
+
+def _resolve_player_sides(player_map):
+    normalized_user = normalize_name(FoulPlayConfig.user_id or FoulPlayConfig.username)
+    normalized_username = normalize_name(FoulPlayConfig.username)
+    for side_id, account in player_map.items():
+        normalized_account = normalize_name(account)
+        if normalized_account in {normalized_user, normalized_username}:
+            opponent_side = constants.ID_LOOKUP.get(side_id)
+            return side_id, opponent_side, player_map.get(opponent_side)
+    return None, None, None
+
+
+async def async_pick_move(battle, return_policy: bool = False):
     battle_copy = deepcopy(battle)
     if not battle_copy.team_preview:
         battle_copy.user.update_from_request_json(battle_copy.request_json)
 
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        best_move = await loop.run_in_executor(pool, find_best_move, battle_copy)
+        if return_policy:
+            best_move, policy = await loop.run_in_executor(
+                pool, find_best_move_with_policy, battle_copy
+            )
+        else:
+            best_move = await loop.run_in_executor(pool, find_best_move, battle_copy)
+            policy = None
     battle.user.last_selected_move = LastUsedMove(
         battle.user.active.name,
         best_move.removesuffix("-tera").removesuffix("-mega"),
         battle.turn,
     )
+    if return_policy:
+        return format_decision(battle_copy, best_move), policy
     return format_decision(battle_copy, best_move)
 
 
@@ -100,7 +182,11 @@ async def handle_team_preview(battle, ps_websocket_client):
     battle_copy.opponent.active = Pokemon.get_dummy()
     battle_copy.team_preview = True
 
-    best_move = await async_pick_move(battle_copy)
+    if FoulPlayConfig.suggest_only:
+        best_move, policy = await async_pick_move(battle_copy, return_policy=True)
+        log_suggested_moves(policy)
+    else:
+        best_move = await async_pick_move(battle_copy)
 
     # because we copied the battle before sending it in, we need to update the last selected move here
     pkmn_name = battle.user.reserve[int(best_move[0].split()[1]) - 1].name
@@ -118,6 +204,10 @@ async def handle_team_preview(battle, ps_websocket_client):
             choice_digit, "".join(str(x) for x in team_list_indexes), battle.rqid
         )
     ]
+
+    if FoulPlayConfig.suggest_only:
+        logger.info("Suggested team preview: %s", message[0])
+        return
 
     await ps_websocket_client.send_message(battle.battle_tag, message)
 
@@ -207,8 +297,13 @@ async def start_random_battle(
     # apply the messages that were held onto
     process_battle_updates(battle)
 
-    best_move = await async_pick_move(battle)
-    await ps_websocket_client.send_message(battle.battle_tag, best_move)
+    if FoulPlayConfig.suggest_only:
+        best_move, policy = await async_pick_move(battle, return_policy=True)
+        log_suggested_moves(policy)
+        logger.info("Suggested move: %s", best_move[0])
+    else:
+        best_move = await async_pick_move(battle)
+        await ps_websocket_client.send_message(battle.battle_tag, best_move)
 
     return battle
 
@@ -252,8 +347,13 @@ async def start_standard_battle(
         # apply the messages that were held onto
         process_battle_updates(battle)
 
-        best_move = await async_pick_move(battle)
-        await ps_websocket_client.send_message(battle.battle_tag, best_move)
+        if FoulPlayConfig.suggest_only:
+            best_move, policy = await async_pick_move(battle, return_policy=True)
+            log_suggested_moves(policy)
+            logger.info("Suggested move: %s", best_move[0])
+        else:
+            best_move = await async_pick_move(battle)
+            await ps_websocket_client.send_message(battle.battle_tag, best_move)
 
     else:
         while constants.START_TEAM_PREVIEW not in msg:
@@ -310,14 +410,16 @@ async def start_battle(ps_websocket_client, pokemon_battle_type, team_dict):
             ps_websocket_client, pokemon_battle_type, team_dict
         )
 
-    await ps_websocket_client.send_message(battle.battle_tag, ["hf"])
-    await ps_websocket_client.send_message(battle.battle_tag, ["/timer on"])
+    # await ps_websocket_client.send_message(battle.battle_tag, ["hf"])
+    if FoulPlayConfig.battle_timer != "none":
+        await ps_websocket_client.send_message(
+            battle.battle_tag, ["/timer {}".format(FoulPlayConfig.battle_timer)]
+        )
 
     return battle
 
 
-async def pokemon_battle(ps_websocket_client, pokemon_battle_type, team_dict):
-    battle = await start_battle(ps_websocket_client, pokemon_battle_type, team_dict)
+async def run_battle_loop(ps_websocket_client, battle):
     while True:
         msg = await ps_websocket_client.receive_message()
         if battle_is_finished(battle.battle_tag, msg):
@@ -345,5 +447,141 @@ async def pokemon_battle(ps_websocket_client, pokemon_battle_type, team_dict):
         else:
             action_required = await async_update_battle(battle, msg)
             if action_required and not battle.wait:
-                best_move = await async_pick_move(battle)
-                await ps_websocket_client.send_message(battle.battle_tag, best_move)
+                if FoulPlayConfig.suggest_only:
+                    best_move, policy = await async_pick_move(
+                        battle, return_policy=True
+                    )
+                    log_suggested_moves(policy)
+                    logger.info("Suggested move: %s", best_move[0])
+                else:
+                    best_move = await async_pick_move(battle)
+                    await ps_websocket_client.send_message(
+                        battle.battle_tag, best_move
+                    )
+
+
+async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
+    if battle_tag is None:
+        raise ValueError("battle_tag is required to resume a battle")
+
+    await ps_websocket_client.join_room(battle_tag)
+
+    backlog_msgs = []
+    player_map = {}
+    known_pkmn_names = set()
+    battle_factory_tier = None
+    request_json = None
+
+    while True:
+        msg = await ps_websocket_client.receive_message()
+        msg_lines = msg.split("\n")
+        room_id = _extract_battle_room_id(msg_lines)
+        if room_id is None:
+            continue
+        if room_id != battle_tag:
+            continue
+
+        backlog_msgs.append(msg)
+        _collect_player_map(msg_lines, player_map)
+        _collect_known_pokemon(msg_lines, known_pkmn_names)
+        if battle_factory_tier is None:
+            battle_factory_tier = _collect_battle_factory_tier(msg_lines)
+
+        request_json = request_json or _extract_request_json(msg_lines)
+        if request_json is not None and len(player_map) >= 2:
+            break
+
+    if request_json is None:
+        raise ValueError("Did not receive request JSON while resuming battle")
+
+    for pkmn_dict in request_json[constants.SIDE][constants.POKEMON]:
+        pkmn_name = normalize_name(pkmn_dict[constants.DETAILS].split(",")[0])
+        if pkmn_name:
+            known_pkmn_names.add(pkmn_name)
+
+    battle = Battle(battle_tag)
+    battle.pokemon_format = pokemon_battle_type
+    battle.generation = pokemon_battle_type[:4]
+
+    if "random" in pokemon_battle_type:
+        battle.battle_type = BattleType.RANDOM_BATTLE
+    elif "battlefactory" in pokemon_battle_type:
+        battle.battle_type = BattleType.BATTLE_FACTORY
+    else:
+        battle.battle_type = BattleType.STANDARD_BATTLE
+
+    user_side, opponent_side, opponent_account_name = _resolve_player_sides(player_map)
+    if user_side is None or opponent_side is None:
+        raise ValueError(
+            "Could not match logged-in user to battle players: {}".format(player_map)
+        )
+
+    battle.user.name = user_side
+    battle.opponent.name = opponent_side
+    battle.opponent.account_name = opponent_account_name
+
+    if FoulPlayConfig.log_to_file:
+        FoulPlayConfig.file_log_handler.do_rollover(
+            "{}_{}.log".format(battle_tag, opponent_account_name or "unknown")
+        )
+
+    if battle.battle_type == BattleType.RANDOM_BATTLE:
+        RandomBattleTeamDatasets.initialize(battle.generation)
+    elif known_pkmn_names:
+        if battle.battle_type == BattleType.BATTLE_FACTORY:
+            if battle_factory_tier is None:
+                logger.warning(
+                    "Battle Factory tier not found; using default team datasets"
+                )
+                TeamDatasets.initialize(pokemon_battle_type, known_pkmn_names)
+            else:
+                TeamDatasets.initialize(
+                    pokemon_battle_type,
+                    known_pkmn_names,
+                    battle_factory_tier_name=battle_factory_tier,
+                )
+        else:
+            SmogonSets.initialize(
+                FoulPlayConfig.smogon_stats or pokemon_battle_type, known_pkmn_names
+            )
+            TeamDatasets.initialize(pokemon_battle_type, known_pkmn_names)
+
+    action_required = False
+    for msg in backlog_msgs:
+        action_required = update_battle(battle, msg)
+        if battle.request_json is not None:
+            break
+
+    if battle.request_json is None:
+        raise ValueError("Resume battle did not receive request JSON")
+
+    try:
+        battle.user.update_from_request_json(battle.request_json)
+    except Exception as exc:
+        logger.warning("Failed to update user data from request JSON: %s", exc)
+        battle.user.initialize_first_turn_user_from_json(battle.request_json)
+
+    battle.started = True
+    if battle.rqid is None:
+        battle.rqid = battle.request_json.get(constants.RQID)
+
+    if FoulPlayConfig.battle_timer != "none":
+        await ps_websocket_client.send_message(
+            battle.battle_tag, ["/timer {}".format(FoulPlayConfig.battle_timer)]
+        )
+
+    if action_required and not battle.wait:
+        if FoulPlayConfig.suggest_only:
+            best_move, policy = await async_pick_move(battle, return_policy=True)
+            log_suggested_moves(policy)
+            logger.info("Suggested move: %s", best_move[0])
+        else:
+            best_move = await async_pick_move(battle)
+            await ps_websocket_client.send_message(battle.battle_tag, best_move)
+
+    return await run_battle_loop(ps_websocket_client, battle)
+
+
+async def pokemon_battle(ps_websocket_client, pokemon_battle_type, team_dict):
+    battle = await start_battle(ps_websocket_client, pokemon_battle_type, team_dict)
+    return await run_battle_loop(ps_websocket_client, battle)

@@ -520,7 +520,11 @@ def switch_or_drag(battle, split_msg, switch_or_drag="switch"):
     # this is handled by set-prediction for the opponent, but for the bot's pkmn we
     # need to re-apply the stats that the P.S. server sends us because prior to the first
     # switch-in the stats would be for zacian, not zacian-crowned
-    if side_name == "user" and pkmn.name in ["zaciancrowned", "zamazentacrowned"]:
+    if (
+        side_name == "user"
+        and pkmn.name in ["zaciancrowned", "zamazentacrowned"]
+        and battle.request_json is not None
+    ):
         battle.user.re_initialize_active_pokemon_from_request_json(battle.request_json)
 
     for ability in ABILITIES_REVEALED_ON_SWITCH_IN:
@@ -2082,7 +2086,7 @@ def form_change(battle, split_msg):
 
     logger.info("Form Change: {} -> {}".format(side.active.name, split_msg[3]))
     side.active.forme_change(split_msg[3])
-    if is_user:
+    if is_user and battle.request_json is not None:
         side.re_initialize_active_pokemon_from_request_json(battle.request_json)
 
 
@@ -2597,6 +2601,8 @@ def check_speed_ranges(battle, msg_lines):
             - the opponent COULD have prankster and it used a status move
             - Grassy Glide is used when Grassy Terrain is up
     """
+    if battle.user.active is None or battle.opponent.active is None:
+        return
     for ln in msg_lines:
         # If either side switched this turn - don't do this check
         if ln.startswith("|switch|"):

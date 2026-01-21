@@ -61,6 +61,7 @@ class BotModes(Enum):
     challenge_user = auto()
     accept_challenge = auto()
     search_ladder = auto()
+    resume_battle = auto()
 
 
 class _FoulPlayConfig:
@@ -78,7 +79,10 @@ class _FoulPlayConfig:
     team_name: str
     user_to_challenge: str
     save_replay: SaveReplay
+    battle_timer: str
+    suggest_only: bool
     room_name: str
+    battle_tag: str
     log_level: str
     log_to_file: bool
     stdout_log_handler: logging.StreamHandler
@@ -142,9 +146,30 @@ class _FoulPlayConfig:
             help="When to save replays",
         )
         parser.add_argument(
+            "--battle-timer",
+            default="on",
+            choices=["on", "off", "none"],
+            help="Whether to enable the battle timer at the start of each battle",
+        )
+        parser.add_argument(
+            "--suggest-only",
+            action="store_true",
+            help="Only log suggested moves; do not send them to the server",
+        )
+        parser.add_argument(
             "--room-name",
             default=None,
             help="If bot_mode is `accept_challenge`, the room to join while waiting",
+        )
+        parser.add_argument(
+            "--battle-tag",
+            default=None,
+            help="If bot_mode is `resume_battle`, the battle room id (e.g. battle-gen9ou-1234)",
+        )
+        parser.add_argument(
+            "--battle-url",
+            default=None,
+            help="If bot_mode is `resume_battle`, a full battle URL to parse into a battle tag",
         )
         parser.add_argument("--log-level", default="DEBUG", help="Python logging level")
         parser.add_argument(
@@ -167,11 +192,25 @@ class _FoulPlayConfig:
         self.team_name = args.team_name or self.pokemon_format
         self.user_to_challenge = args.user_to_challenge
         self.save_replay = SaveReplay[args.save_replay]
+        self.battle_timer = args.battle_timer
+        self.suggest_only = args.suggest_only
         self.room_name = args.room_name
+        self.battle_tag = args.battle_tag
+        if args.battle_url and not self.battle_tag:
+            self.battle_tag = self._battle_tag_from_url(args.battle_url)
+        if self.battle_tag and not self.battle_tag.startswith("battle-"):
+            self.battle_tag = "battle-{}".format(self.battle_tag)
+        if self.battle_tag:
+            self.battle_tag = self.battle_tag.lower()
         self.log_level = args.log_level
         self.log_to_file = args.log_to_file
 
         self.validate_config()
+
+    @staticmethod
+    def _battle_tag_from_url(battle_url: str) -> str:
+        cleaned = battle_url.split("#")[0].split("?")[0].rstrip("/")
+        return cleaned.split("/")[-1]
 
     def requires_team(self) -> bool:
         return not (
@@ -183,6 +222,11 @@ class _FoulPlayConfig:
             assert (
                 self.user_to_challenge is not None
             ), "If bot_mode is `CHALLENGE_USER`, you must declare USER_TO_CHALLENGE"
+        if self.bot_mode == BotModes.resume_battle:
+            assert (
+                self.battle_tag is not None
+            ), "If bot_mode is `RESUME_BATTLE`, you must declare BATTLE_TAG or BATTLE_URL"
+            self.run_count = 1
 
 
 FoulPlayConfig = _FoulPlayConfig()

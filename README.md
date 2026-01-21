@@ -17,6 +17,15 @@ Command-line arguments are used to configure Foul Play
 
 use `python run.py --help` to see all options.
 
+#### Bot modes
+
+- `search_ladder`: queue for a ranked match
+- `challenge_user`: challenge a specific user (requires `--user-to-challenge`)
+- `accept_challenge`: wait for challenges (optionally `--room-name`)
+- `resume_battle`: take over an in-progress battle (requires `--battle-tag` or `--battle-url`)
+
+Note: `resume_battle` logs in as the account that is already in the battle, which will disconnect any other active session for that account.
+
 ### Running Locally
 
 **1. Clone**
@@ -42,6 +51,53 @@ python run.py \
 --bot-mode search_ladder \
 --pokemon-format gen9randombattle
 ```
+
+More examples:
+
+Accept challenges in a room:
+```bash
+python run.py \
+--websocket-uri wss://sim3.psim.us/showdown/websocket \
+--ps-username 'My Username' \
+--ps-password sekret \
+--bot-mode accept_challenge \
+--pokemon-format gen9randombattle \
+--room-name lobby
+```
+
+Challenge a specific user:
+```bash
+python run.py \
+--websocket-uri wss://sim3.psim.us/showdown/websocket \
+--ps-username 'My Username' \
+--ps-password sekret \
+--bot-mode challenge_user \
+--user-to-challenge 'Opponent Name' \
+--pokemon-format gen9randombattle
+```
+
+Resume an ongoing battle by tag or URL:
+```bash
+python run.py \
+--websocket-uri wss://sim3.psim.us/showdown/websocket \
+--ps-username 'My Username' \
+--ps-password sekret \
+--bot-mode resume_battle \
+--pokemon-format gen9ou \
+--battle-tag battle-gen9ou-123456
+```
+
+```bash
+python run.py \
+--websocket-uri wss://sim3.psim.us/showdown/websocket \
+--ps-username 'My Username' \
+--ps-password sekret \
+--bot-mode resume_battle \
+--pokemon-format gen9ou \
+--battle-url https://play.pokemonshowdown.com/battle-gen9ou-123456
+```
+
+Add `--suggest-only` to log suggested moves without sending them.
 
 ### Running with Docker
 
@@ -99,3 +155,22 @@ For example, to re-install the engine for generation 4:
 ```shell
 make poke_engine GEN=gen4
 ```
+
+## Updating from the original repo
+
+If you cloned this project and pushed it to your own GitHub repo, you can keep the original author as an `upstream` remote and pull updates.
+
+Add the original repo as `upstream` once:
+```bash
+git remote add upstream https://github.com/pmariglia/foul-play.git
+git fetch upstream
+```
+
+When you want to update your repo:
+```bash
+git fetch upstream
+git merge upstream/main
+git push origin main
+```
+
+If the original repo uses `master` instead of `main`, replace `upstream/main` with `upstream/master`.

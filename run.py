@@ -7,7 +7,7 @@ from copy import deepcopy
 from config import FoulPlayConfig, init_logging, BotModes
 
 from teams import load_team
-from fp.run_battle import pokemon_battle
+from fp.run_battle import pokemon_battle, resume_battle
 from fp.websocket_client import PSWebsocketClient
 
 from data import all_move_json
@@ -65,11 +65,16 @@ async def run_foul_play():
     team_file_name = "None"
     team_dict = None
     while True:
-        if FoulPlayConfig.requires_team():
-            team_packed, team_dict, team_file_name = load_team(FoulPlayConfig.team_name)
-            await ps_websocket_client.update_team(team_packed)
-        else:
-            await ps_websocket_client.update_team("None")
+        team_dict = None
+        team_file_name = "None"
+        if FoulPlayConfig.bot_mode != BotModes.resume_battle:
+            if FoulPlayConfig.requires_team():
+                team_packed, team_dict, team_file_name = load_team(
+                    FoulPlayConfig.team_name
+                )
+                await ps_websocket_client.update_team(team_packed)
+            else:
+                await ps_websocket_client.update_team("None")
 
         if FoulPlayConfig.bot_mode == BotModes.challenge_user:
             await ps_websocket_client.challenge_user(
@@ -82,6 +87,24 @@ async def run_foul_play():
             )
         elif FoulPlayConfig.bot_mode == BotModes.search_ladder:
             await ps_websocket_client.search_for_match(FoulPlayConfig.pokemon_format)
+        elif FoulPlayConfig.bot_mode == BotModes.resume_battle:
+            winner = await resume_battle(
+                ps_websocket_client,
+                FoulPlayConfig.pokemon_format,
+                FoulPlayConfig.battle_tag,
+            )
+            if winner == FoulPlayConfig.username:
+                wins += 1
+                logger.info("Won with team: {}".format(team_file_name))
+            else:
+                losses += 1
+                logger.info("Lost with team: {}".format(team_file_name))
+
+            logger.info("W: {}\tL: {}".format(wins, losses))
+            check_dictionaries_are_unmodified(original_pokedex, original_move_json)
+
+            battles_run += 1
+            break
         else:
             raise ValueError("Invalid Bot Mode: {}".format(FoulPlayConfig.bot_mode))
 
