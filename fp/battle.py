@@ -64,6 +64,7 @@ class Battle:
         self.battle_tag = battle_tag
         self.user = Battler()
         self.opponent = Battler()
+        self.started_at = None
         self.weather = None
         self.weather_turns_remaining = -1
         self.weather_source = ""

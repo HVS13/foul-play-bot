@@ -2,10 +2,13 @@ import json
 import asyncio
 import concurrent.futures
 from copy import deepcopy
+from datetime import datetime
 import logging
+import time
 
 from data.pkmn_sets import RandomBattleTeamDatasets, TeamDatasets
 from data.pkmn_sets import SmogonSets
+from data import all_move_json
 import constants
 from constants import BattleType
 from config import FoulPlayConfig, SaveReplay
@@ -13,13 +16,95 @@ from fp.battle import LastUsedMove, Pokemon, Battle
 from fp.battle_modifier import async_update_battle, process_battle_updates, update_battle
 from fp.helpers import normalize_name
 from fp.search.main import find_best_move, find_best_move_with_policy
+from fp.search.poke_engine_helpers import poke_engine_get_damage_rolls
 
 from fp.websocket_client import PSWebsocketClient
 
 logger = logging.getLogger(__name__)
 
+HEALING_MOVES = {
+    "recover",
+    "roost",
+    "softboiled",
+    "wish",
+    "moonlight",
+    "morningsun",
+    "synthesis",
+    "slackoff",
+    "milkdrink",
+    "shoreup",
+    "healorder",
+    "rest",
+}
 
-def log_suggested_moves(policy, limit=3):
+
+def _is_setup_move(move_json):
+    if constants.BOOSTS in move_json:
+        return True
+    if (
+        constants.SELF in move_json
+        and constants.BOOSTS in move_json[constants.SELF]
+    ):
+        return True
+    return False
+
+
+def _move_can_ko(battle, move_id):
+    if (
+        battle.team_preview
+        or battle.user.active is None
+        or battle.opponent.active is None
+    ):
+        return False
+    battle_copy = deepcopy(battle)
+    if battle_copy.request_json is not None:
+        battle_copy.user.update_from_request_json(battle_copy.request_json)
+    try:
+        damage_rolls, _ = poke_engine_get_damage_rolls(
+            battle_copy,
+            move_id,
+            constants.DO_NOTHING_MOVE,
+            True,
+        )
+    except Exception:
+        return False
+    if not damage_rolls:
+        return False
+    return max(damage_rolls) >= battle_copy.opponent.active.hp
+
+
+def _move_reason_tags(battle, decision):
+    tags = []
+    decision = decision.removesuffix("-tera").removesuffix("-mega")
+    if decision.startswith(constants.SWITCH_STRING + " "):
+        return ["switch"]
+
+    move_id = normalize_name(decision)
+    if move_id in constants.SWITCH_OUT_MOVES:
+        tags.append("pivot")
+
+    move_json = all_move_json.get(move_id)
+    if move_json is None:
+        return tags
+
+    if move_json.get(constants.PRIORITY, 0) > 0:
+        tags.append("priority")
+
+    if move_id in HEALING_MOVES or move_json.get("heal"):
+        tags.append("heal")
+    elif _is_setup_move(move_json):
+        tags.append("setup")
+    elif move_json.get(constants.CATEGORY) == constants.STATUS:
+        tags.append("status")
+    else:
+        tags.append("attack")
+        if _move_can_ko(battle, move_id):
+            tags.append("ko")
+
+    return tags
+
+
+def log_suggested_moves(battle, policy, limit=3):
     if not policy:
         logger.info("Suggested moves: <none>")
         return
@@ -28,7 +113,11 @@ def log_suggested_moves(policy, limit=3):
         "Suggested moves (top {}, ordered by policy weight):".format(limit)
     )
     for move, weight in policy[:limit]:
-        logger.info("\t{}%: {}".format(round(weight * 100, 3), move))
+        tags = _move_reason_tags(battle, move)
+        tag_string = " [{}]".format(", ".join(tags)) if tags else ""
+        logger.info(
+            "\t{}%: {}{}".format(round(weight * 100, 3), move, tag_string)
+        )
 
 
 def format_decision(battle, decision):
@@ -184,7 +273,7 @@ async def handle_team_preview(battle, ps_websocket_client):
 
     if FoulPlayConfig.suggest_only:
         best_move, policy = await async_pick_move(battle_copy, return_policy=True)
-        log_suggested_moves(policy)
+        log_suggested_moves(battle, policy)
     else:
         best_move = await async_pick_move(battle_copy)
 
@@ -237,6 +326,7 @@ async def start_battle_common(
         )
 
     battle = Battle(battle_tag)
+    battle.started_at = time.time()
     battle.opponent.account_name = opponent_name
     battle.pokemon_format = pokemon_battle_type
     battle.generation = pokemon_battle_type[:4]
@@ -299,7 +389,7 @@ async def start_random_battle(
 
     if FoulPlayConfig.suggest_only:
         best_move, policy = await async_pick_move(battle, return_policy=True)
-        log_suggested_moves(policy)
+        log_suggested_moves(battle, policy)
         logger.info("Suggested move: %s", best_move[0])
     else:
         best_move = await async_pick_move(battle)
@@ -349,7 +439,7 @@ async def start_standard_battle(
 
         if FoulPlayConfig.suggest_only:
             best_move, policy = await async_pick_move(battle, return_policy=True)
-            log_suggested_moves(policy)
+            log_suggested_moves(battle, policy)
             logger.info("Suggested move: %s", best_move[0])
         else:
             best_move = await async_pick_move(battle)
@@ -442,6 +532,7 @@ async def run_battle_loop(ps_websocket_client, battle):
                 )
             ):
                 await ps_websocket_client.save_replay(battle.battle_tag)
+            _write_battle_summary(battle, winner)
             await ps_websocket_client.leave_battle(battle.battle_tag)
             return winner
         else:
@@ -451,7 +542,7 @@ async def run_battle_loop(ps_websocket_client, battle):
                     best_move, policy = await async_pick_move(
                         battle, return_policy=True
                     )
-                    log_suggested_moves(policy)
+                    log_suggested_moves(battle, policy)
                     logger.info("Suggested move: %s", best_move[0])
                 else:
                     best_move = await async_pick_move(battle)
@@ -500,6 +591,7 @@ async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
             known_pkmn_names.add(pkmn_name)
 
     battle = Battle(battle_tag)
+    battle.started_at = time.time()
     battle.pokemon_format = pokemon_battle_type
     battle.generation = pokemon_battle_type[:4]
 
@@ -573,13 +665,54 @@ async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
     if action_required and not battle.wait:
         if FoulPlayConfig.suggest_only:
             best_move, policy = await async_pick_move(battle, return_policy=True)
-            log_suggested_moves(policy)
+            log_suggested_moves(battle, policy)
             logger.info("Suggested move: %s", best_move[0])
         else:
             best_move = await async_pick_move(battle)
             await ps_websocket_client.send_message(battle.battle_tag, best_move)
 
     return await run_battle_loop(ps_websocket_client, battle)
+
+
+def _write_battle_summary(battle, winner):
+    if not FoulPlayConfig.summary_path and not FoulPlayConfig.summary_json_path:
+        return
+
+    turns = battle.turn or 0
+    summary = {
+        "battle_tag": battle.battle_tag,
+        "format": battle.pokemon_format,
+        "winner": winner,
+        "turns": turns,
+        "bot_mode": FoulPlayConfig.bot_mode.name,
+        "risk_mode": FoulPlayConfig.risk_mode.name,
+        "suggest_only": FoulPlayConfig.suggest_only,
+        "timestamp_utc": datetime.utcnow().isoformat() + "Z",
+    }
+    if battle.started_at:
+        summary["duration_seconds"] = int(time.time() - battle.started_at)
+
+    if FoulPlayConfig.summary_path:
+        lines = [
+            "battle_tag: {}".format(summary["battle_tag"]),
+            "format: {}".format(summary["format"]),
+            "winner: {}".format(summary["winner"]),
+            "turns: {}".format(summary["turns"]),
+            "bot_mode: {}".format(summary["bot_mode"]),
+            "risk_mode: {}".format(summary["risk_mode"]),
+            "suggest_only: {}".format(summary["suggest_only"]),
+            "timestamp_utc: {}".format(summary["timestamp_utc"]),
+        ]
+        if "duration_seconds" in summary:
+            lines.append(
+                "duration_seconds: {}".format(summary["duration_seconds"])
+            )
+        with open(FoulPlayConfig.summary_path, "a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n\n")
+
+    if FoulPlayConfig.summary_json_path:
+        with open(FoulPlayConfig.summary_json_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(summary) + "\n")
 
 
 async def pokemon_battle(ps_websocket_client, pokemon_battle_type, team_dict):

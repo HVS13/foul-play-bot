@@ -6,6 +6,8 @@ import time
 
 import logging
 
+from config import FoulPlayConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -25,6 +27,8 @@ class PSWebsocketClient:
     password = None
     last_message = None
     last_challenge_time = 0
+    user_id = None
+    rooms = None
 
     @classmethod
     async def create(cls, username, password, address):
@@ -32,25 +36,42 @@ class PSWebsocketClient:
         self.username = username
         self.password = password
         self.address = address
-        self.websocket = await websockets.connect(self.address)
+        await self._connect()
         self.login_uri = "https://play.pokemonshowdown.com/api/login"
+        self.rooms = set()
         return self
+
+    async def _connect(self):
+        self.websocket = await websockets.connect(self.address)
 
     async def join_room(self, room_name):
         message = "/join {}".format(room_name)
         await self.send_message("", [message])
+        if room_name:
+            self.rooms.add(room_name)
         logger.debug("Joined room '{}'".format(room_name))
 
     async def receive_message(self):
-        message = await self.websocket.recv()
-        logger.debug("Received message from websocket: {}".format(message))
-        return message
+        while True:
+            try:
+                message = await self.websocket.recv()
+                logger.debug("Received message from websocket: {}".format(message))
+                return message
+            except (websockets.ConnectionClosed, OSError) as exc:
+                await self._reconnect(exc)
 
     async def send_message(self, room, message_list):
         message = room + "|" + "|".join(message_list)
         logger.debug("Sending message to websocket: {}".format(message))
-        await self.websocket.send(message)
-        self.last_message = message
+        while True:
+            try:
+                await self.websocket.send(message)
+                self.last_message = message
+                if room:
+                    self.rooms.add(room)
+                return
+            except (websockets.ConnectionClosed, OSError) as exc:
+                await self._reconnect(exc)
 
     async def avatar(self, avatar):
         await self.send_message("", ["/avatar {}".format(avatar)])
@@ -108,7 +129,41 @@ class PSWebsocketClient:
         logger.info("Successfully logged in")
         await self.send_message("", message)
         await asyncio.sleep(3)
-        return response_json["curuser"]["userid"]
+        self.user_id = response_json["curuser"]["userid"]
+        return self.user_id
+
+    async def _reconnect(self, exc):
+        max_retries = FoulPlayConfig.reconnect_retries
+        if max_retries <= 0:
+            raise exc
+
+        for attempt in range(1, max_retries + 1):
+            wait_seconds = min(
+                FoulPlayConfig.reconnect_backoff_seconds * (2 ** (attempt - 1)),
+                FoulPlayConfig.reconnect_max_backoff_seconds,
+            )
+            logger.warning(
+                "Websocket disconnected (%s). Reconnect attempt %s/%s in %ss",
+                exc,
+                attempt,
+                max_retries,
+                round(wait_seconds, 2),
+            )
+            await asyncio.sleep(wait_seconds)
+            try:
+                await self._connect()
+                await self.login()
+                if FoulPlayConfig.avatar is not None:
+                    await self.avatar(FoulPlayConfig.avatar)
+                for room in list(self.rooms):
+                    await self.join_room(room)
+                logger.info("Reconnected successfully")
+                return
+            except Exception as reconnect_exc:
+                logger.warning("Reconnect attempt %s failed: %s", attempt, reconnect_exc)
+
+        logger.error("Max reconnect attempts reached")
+        raise exc
 
     async def update_team(self, team):
         await self.send_message("", ["/utm {}".format(team)])

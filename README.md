@@ -26,6 +26,38 @@ use `python run.py --help` to see all options.
 
 Note: `resume_battle` logs in as the account that is already in the battle, which will disconnect any other active session for that account.
 
+#### Risk modes
+
+Control how adventurous the bot is when picking among top moves:
+
+- `auto`: adjust risk based on the current battle state
+- `safe`: pick the most reliable move (lowest variance)
+- `balanced`: default tradeoff of safety and exploration
+- `aggressive`: consider a wider set of moves to chase higher upside
+
+Set with `--risk-mode auto|safe|balanced|aggressive` (default: `balanced`).
+`auto` leans safe when ahead on remaining Pokemon/HP and aggressive when behind.
+
+#### Search and QoL options
+
+- `--auto-parallelism` and `--parallelism-cap` to scale search by CPU.
+- Dynamic search time increases in late-game/low-HP situations by default.
+- `--summary-path` writes a text summary per battle (appends).
+- `--summary-json-path` writes JSONL summaries per battle (appends).
+- `--reconnect-retries`, `--reconnect-backoff-seconds`, `--reconnect-max-backoff-seconds` control websocket reconnect behavior.
+- `--suggest-only` prints top move options with short tags (e.g. `ko`, `setup`, `pivot`).
+
+#### Defaults for new options
+
+- `--risk-mode`: `balanced`
+- `--auto-parallelism`: `false`
+- `--parallelism-cap`: `8`
+- `--summary-path`: `None` (disabled)
+- `--summary-json-path`: `None` (disabled)
+- `--reconnect-retries`: `5`
+- `--reconnect-backoff-seconds`: `1.0`
+- `--reconnect-max-backoff-seconds`: `30.0`
+
 ### Running Locally
 
 **1. Clone**
@@ -98,6 +130,24 @@ python run.py \
 ```
 
 Add `--suggest-only` to log suggested moves without sending them.
+
+Realistic example with new options enabled:
+```bash
+python run.py \
+--websocket-uri wss://sim3.psim.us/showdown/websocket \
+--ps-username 'My Username' \
+--ps-password sekret \
+--bot-mode search_ladder \
+--pokemon-format gen9ou \
+--risk-mode auto \
+--auto-parallelism \
+--parallelism-cap 6 \
+--summary-path logs/battle_summary.txt \
+--summary-json-path logs/battle_summary.jsonl \
+--reconnect-retries 6 \
+--reconnect-backoff-seconds 1.5 \
+--reconnect-max-backoff-seconds 20
+```
 
 ### Running with Docker
 

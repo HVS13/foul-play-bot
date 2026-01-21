@@ -64,6 +64,13 @@ class BotModes(Enum):
     resume_battle = auto()
 
 
+class RiskModes(Enum):
+    auto = auto()
+    safe = auto()
+    balanced = auto()
+    aggressive = auto()
+
+
 class _FoulPlayConfig:
     websocket_uri: str
     username: str
@@ -83,6 +90,12 @@ class _FoulPlayConfig:
     suggest_only: bool
     room_name: str
     battle_tag: str
+    risk_mode: RiskModes
+    summary_path: str
+    summary_json_path: str
+    reconnect_retries: int
+    reconnect_backoff_seconds: float
+    reconnect_max_backoff_seconds: float
     log_level: str
     log_to_file: bool
     stdout_log_handler: logging.StreamHandler
@@ -125,6 +138,17 @@ class _FoulPlayConfig:
             type=int,
             default=1,
             help="Number of states to search in parallel",
+        )
+        parser.add_argument(
+            "--auto-parallelism",
+            action="store_true",
+            help="Automatically set search parallelism based on CPU count",
+        )
+        parser.add_argument(
+            "--parallelism-cap",
+            type=int,
+            default=8,
+            help="Upper bound when --auto-parallelism is enabled",
         )
         parser.add_argument(
             "--run-count",
@@ -171,6 +195,40 @@ class _FoulPlayConfig:
             default=None,
             help="If bot_mode is `resume_battle`, a full battle URL to parse into a battle tag",
         )
+        parser.add_argument(
+            "--risk-mode",
+            default="balanced",
+            choices=[e.name for e in RiskModes],
+            help="Move selection style: auto, safe, balanced, or aggressive",
+        )
+        parser.add_argument(
+            "--summary-path",
+            default=None,
+            help="Write a text summary for each battle to this file (appends)",
+        )
+        parser.add_argument(
+            "--summary-json-path",
+            default=None,
+            help="Write JSONL summaries for each battle to this file (appends)",
+        )
+        parser.add_argument(
+            "--reconnect-retries",
+            type=int,
+            default=5,
+            help="Max reconnect attempts after websocket disconnects",
+        )
+        parser.add_argument(
+            "--reconnect-backoff-seconds",
+            type=float,
+            default=1.0,
+            help="Initial reconnect backoff in seconds",
+        )
+        parser.add_argument(
+            "--reconnect-max-backoff-seconds",
+            type=float,
+            default=30.0,
+            help="Max reconnect backoff in seconds",
+        )
         parser.add_argument("--log-level", default="DEBUG", help="Python logging level")
         parser.add_argument(
             "--log-to-file",
@@ -188,6 +246,9 @@ class _FoulPlayConfig:
         self.smogon_stats = args.smogon_stats_format
         self.search_time_ms = args.search_time_ms
         self.parallelism = args.search_parallelism
+        if args.auto_parallelism:
+            self.parallelism = self._auto_parallelism(args.parallelism_cap)
+        self.parallelism = max(1, self.parallelism)
         self.run_count = args.run_count
         self.team_name = args.team_name or self.pokemon_format
         self.user_to_challenge = args.user_to_challenge
@@ -202,6 +263,12 @@ class _FoulPlayConfig:
             self.battle_tag = "battle-{}".format(self.battle_tag)
         if self.battle_tag:
             self.battle_tag = self.battle_tag.lower()
+        self.risk_mode = RiskModes[args.risk_mode]
+        self.summary_path = args.summary_path
+        self.summary_json_path = args.summary_json_path
+        self.reconnect_retries = args.reconnect_retries
+        self.reconnect_backoff_seconds = args.reconnect_backoff_seconds
+        self.reconnect_max_backoff_seconds = args.reconnect_max_backoff_seconds
         self.log_level = args.log_level
         self.log_to_file = args.log_to_file
 
@@ -211,6 +278,13 @@ class _FoulPlayConfig:
     def _battle_tag_from_url(battle_url: str) -> str:
         cleaned = battle_url.split("#")[0].split("?")[0].rstrip("/")
         return cleaned.split("/")[-1]
+
+    @staticmethod
+    def _auto_parallelism(parallelism_cap: int) -> int:
+        cpu_count = os.cpu_count() or 1
+        if cpu_count <= 1:
+            return 1
+        return max(1, min(cpu_count - 1, parallelism_cap))
 
     def requires_team(self) -> bool:
         return not (
