@@ -1,7 +1,9 @@
 import argparse
+import json
 import logging
 import os
 import sys
+import tomllib
 from enum import Enum, auto
 from logging.handlers import RotatingFileHandler
 from typing import Optional
@@ -104,18 +106,94 @@ class _FoulPlayConfig:
     stdout_log_handler: logging.StreamHandler
     file_log_handler: Optional[CustomRotatingFileHandler]
 
+    @staticmethod
+    def _load_config_file(config_path: Optional[str]) -> dict:
+        if not config_path:
+            return {}
+
+        if not os.path.exists(config_path):
+            print(
+                "Config file not found: {}".format(config_path), file=sys.stderr
+            )
+            sys.exit(2)
+
+        _, ext = os.path.splitext(config_path)
+        ext = ext.lower()
+        try:
+            if ext == ".toml":
+                with open(config_path, "rb") as handle:
+                    raw_config = tomllib.load(handle)
+            elif ext == ".json":
+                with open(config_path, "r", encoding="utf-8") as handle:
+                    raw_config = json.load(handle)
+            else:
+                print(
+                    "Unsupported config file extension '{}'. Use .toml or .json".format(
+                        ext
+                    ),
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+        except Exception as exc:
+            print(
+                "Failed to load config file {}: {}".format(config_path, exc),
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        if isinstance(raw_config, dict) and "foul_play" in raw_config:
+            if isinstance(raw_config["foul_play"], dict):
+                raw_config = raw_config["foul_play"]
+
+        if not isinstance(raw_config, dict):
+            print(
+                "Config file must be a JSON/TOML object at the top level",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+        normalized = {}
+        for key, value in raw_config.items():
+            if not isinstance(key, str):
+                print("Config keys must be strings", file=sys.stderr)
+                sys.exit(2)
+            normalized_key = key.strip().replace("-", "_")
+            normalized[normalized_key] = value
+
+        if "smogon_stats" in normalized and "smogon_stats_format" not in normalized:
+            normalized["smogon_stats_format"] = normalized.pop("smogon_stats")
+
+        if "team" in normalized and "team_name" not in normalized:
+            normalized["team_name"] = normalized.pop("team")
+
+        return normalized
+
     def configure(self):
+        config_parser = argparse.ArgumentParser(add_help=False)
+        config_parser.add_argument(
+            "--config",
+            default=None,
+            help="Path to a .toml or .json config file",
+        )
+        config_args, _ = config_parser.parse_known_args()
+        config_defaults = self._load_config_file(config_args.config)
+
         parser = argparse.ArgumentParser()
         parser.add_argument(
+            "--config",
+            default=None,
+            help="Path to a .toml or .json config file",
+        )
+        parser.add_argument(
             "--websocket-uri",
-            required=True,
+            default=None,
             help="The PokemonShowdown websocket URI, e.g. wss://sim3.psim.us/showdown/websocket",
         )
-        parser.add_argument("--ps-username", required=True)
-        parser.add_argument("--ps-password", required=True)
+        parser.add_argument("--ps-username", default=None)
+        parser.add_argument("--ps-password", default=None)
         parser.add_argument("--ps-avatar", default=None)
         parser.add_argument(
-            "--bot-mode", required=True, choices=[e.name for e in BotModes]
+            "--bot-mode", default=None, choices=[e.name for e in BotModes]
         )
         parser.add_argument(
             "--user-to-challenge",
@@ -123,7 +201,7 @@ class _FoulPlayConfig:
             help="If bot_mode is `challenge_user`, this is required",
         )
         parser.add_argument(
-            "--pokemon-format", required=True, help="e.g. gen9randombattle"
+            "--pokemon-format", default=None, help="e.g. gen9randombattle"
         )
         parser.add_argument(
             "--smogon-stats-format",
@@ -144,7 +222,8 @@ class _FoulPlayConfig:
         )
         parser.add_argument(
             "--auto-parallelism",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
+            default=False,
             help="Automatically set search parallelism based on CPU count",
         )
         parser.add_argument(
@@ -180,7 +259,8 @@ class _FoulPlayConfig:
         )
         parser.add_argument(
             "--suggest-only",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
+            default=False,
             help="Only log suggested moves; do not send them to the server",
         )
         parser.add_argument(
@@ -235,16 +315,25 @@ class _FoulPlayConfig:
         parser.add_argument("--log-level", default="DEBUG", help="Python logging level")
         parser.add_argument(
             "--log-to-file",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
+            default=False,
             help="When enabled, DEBUG logs will be written to a file in the logs/ directory",
         )
+
+        allowed_defaults = {action.dest for action in parser._actions}
+        filtered_defaults = {
+            key: value
+            for key, value in config_defaults.items()
+            if key in allowed_defaults
+        }
+        parser.set_defaults(**filtered_defaults)
 
         args = parser.parse_args()
         self.websocket_uri = args.websocket_uri
         self.username = args.ps_username
         self.password = args.ps_password
         self.avatar = args.ps_avatar
-        self.bot_mode = BotModes[args.bot_mode]
+        self.bot_mode = BotModes[args.bot_mode] if args.bot_mode else None
         self.pokemon_format = args.pokemon_format
         self.smogon_stats = args.smogon_stats_format
         self.search_time_ms = args.search_time_ms
@@ -295,6 +384,16 @@ class _FoulPlayConfig:
         )
 
     def validate_config(self):
+        if not self.websocket_uri:
+            raise AssertionError("WEBSOCKET_URI is required")
+        if not self.username:
+            raise AssertionError("PS_USERNAME is required")
+        if not self.password:
+            raise AssertionError("PS_PASSWORD is required")
+        if not self.bot_mode:
+            raise AssertionError("BOT_MODE is required")
+        if not self.pokemon_format:
+            raise AssertionError("POKEMON_FORMAT is required")
         if self.bot_mode == BotModes.challenge_user:
             assert (
                 self.user_to_challenge is not None

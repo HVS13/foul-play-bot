@@ -90,6 +90,18 @@ class Battle:
 
         self.request_json = None
         self.msg_list = []
+        self.search_times_ms = []
+        self.decision_log = []
+        self.decision_count = 0
+        self.win_reason = None
+        self.replay_url = None
+        self.replay_saved = False
+        self.opponent_tendencies = {
+            "actions": 0,
+            "moves": 0,
+            "switches": 0,
+            "protects": 0,
+        }
 
     def initialize_team_preview(self, opponent_pokemon, battle_type):
         self.user.reserve.insert(0, self.user.active)

@@ -1,6 +1,7 @@
 import json
 import asyncio
 import concurrent.futures
+import os
 from copy import deepcopy
 from datetime import datetime
 import logging
@@ -36,6 +37,29 @@ HEALING_MOVES = {
     "healorder",
     "rest",
 }
+
+LAST_BATTLE_TAG_PATH = os.path.join("logs", "last_battle_tag.txt")
+RECONNECT_RESUME = object()
+
+
+def _write_last_battle_tag(battle_tag):
+    if not battle_tag:
+        return
+    try:
+        os.makedirs(os.path.dirname(LAST_BATTLE_TAG_PATH), exist_ok=True)
+        with open(LAST_BATTLE_TAG_PATH, "w", encoding="utf-8") as handle:
+            handle.write(battle_tag)
+    except Exception as exc:
+        logger.warning("Failed to persist last battle tag: %s", exc)
+
+
+def _clear_last_battle_tag():
+    try:
+        os.remove(LAST_BATTLE_TAG_PATH)
+    except FileNotFoundError:
+        return
+    except Exception as exc:
+        logger.warning("Failed to clear last battle tag: %s", exc)
 
 
 def _is_setup_move(move_json):
@@ -179,6 +203,76 @@ def extract_battle_factory_tier_from_msg(msg):
     return normalize_name(tier_name)
 
 
+def _extract_win_reason(msg):
+    reason = None
+    for line in msg.split("\n"):
+        if not line.startswith("|"):
+            continue
+        split_line = line.split("|")
+        if len(split_line) < 2:
+            continue
+        action = split_line[1].strip()
+        if action == "c":
+            continue
+        lower = line.lower()
+        if action == "forfeit" or "|forfeit|" in line:
+            return "forfeit"
+        if "timeout" in lower:
+            reason = reason or "timeout"
+        elif "disconnect" in lower or "disconnected" in lower:
+            reason = reason or "disconnect"
+    return reason
+
+
+def _extract_winner_from_msg(msg):
+    if constants.WIN_STRING in msg:
+        return msg.split(constants.WIN_STRING)[-1].split("\n")[0].strip()
+    return None
+
+
+def _message_indicates_battle_end(battle_tag, msg):
+    if battle_is_finished(battle_tag, msg):
+        return True
+    if msg.startswith(">{}".format(battle_tag)) and "|deinit|" in msg:
+        return True
+    return False
+
+
+_PROTECT_MOVE_IDS = set(
+    constants.PROTECT_VOLATILE_STATUSES
+    + ["detect", "kingsshield", "obstruct", "silktrap"]
+)
+
+
+def _update_opponent_tendencies(battle, msg):
+    if not battle.opponent.name:
+        return
+    tendencies = battle.opponent_tendencies
+    for line in msg.split("\n"):
+        if not line.startswith("|"):
+            continue
+        split_line = line.split("|")
+        if len(split_line) < 3:
+            continue
+        action = split_line[1].strip()
+        actor = split_line[2].strip()
+        if not actor.startswith(battle.opponent.name):
+            continue
+
+        if action in {"switch", "drag", "replace"}:
+            tendencies["switches"] += 1
+            tendencies["actions"] += 1
+            continue
+
+        if action == "move":
+            tendencies["moves"] += 1
+            tendencies["actions"] += 1
+            if len(split_line) > 3:
+                move_id = normalize_name(split_line[3])
+                if move_id in _PROTECT_MOVE_IDS:
+                    tendencies["protects"] += 1
+
+
 def _extract_battle_room_id(msg_lines):
     if not msg_lines:
         return None
@@ -242,6 +336,7 @@ def _resolve_player_sides(player_map):
 
 
 async def async_pick_move(battle, return_policy: bool = False):
+    start_time = time.time()
     battle_copy = deepcopy(battle)
     if not battle_copy.team_preview:
         battle_copy.user.update_from_request_json(battle_copy.request_json)
@@ -255,11 +350,33 @@ async def async_pick_move(battle, return_policy: bool = False):
         else:
             best_move = await loop.run_in_executor(pool, find_best_move, battle_copy)
             policy = None
+    elapsed_ms = int((time.time() - start_time) * 1000)
     battle.user.last_selected_move = LastUsedMove(
         battle.user.active.name,
         best_move.removesuffix("-tera").removesuffix("-mega"),
         battle.turn,
     )
+    try:
+        battle.search_times_ms.append(elapsed_ms)
+        battle.decision_count += 1
+        decision_entry = {
+            "turn": battle.turn or 0,
+            "decision": best_move,
+            "search_time_ms": elapsed_ms,
+            "tags": _move_reason_tags(battle, best_move),
+        }
+        if return_policy and policy:
+            decision_entry["policy_top"] = [
+                {
+                    "move": move,
+                    "weight": round(weight, 6),
+                    "tags": _move_reason_tags(battle, move),
+                }
+                for move, weight in policy[:3]
+            ]
+        battle.decision_log.append(decision_entry)
+    except Exception as exc:
+        logger.debug("Telemetry capture failed: %s", exc)
     if return_policy:
         return format_decision(battle_copy, best_move), policy
     return format_decision(battle_copy, best_move)
@@ -320,6 +437,7 @@ async def start_battle_common(
     ps_websocket_client: PSWebsocketClient, pokemon_battle_type
 ):
     battle_tag, opponent_name = await get_battle_tag_and_opponent(ps_websocket_client)
+    _write_last_battle_tag(battle_tag)
     if FoulPlayConfig.log_to_file:
         FoulPlayConfig.file_log_handler.do_rollover(
             "{}_{}.log".format(battle_tag, opponent_name)
@@ -510,14 +628,50 @@ async def start_battle(ps_websocket_client, pokemon_battle_type, team_dict):
 
 
 async def run_battle_loop(ps_websocket_client, battle):
+    ps_websocket_client.consume_reconnect_flag()
     while True:
         msg = await ps_websocket_client.receive_message()
-        if battle_is_finished(battle.battle_tag, msg):
-            winner = (
-                msg.split(constants.WIN_STRING)[-1].split("\n")[0].strip()
-                if constants.WIN_STRING in msg
-                else None
+        if battle.win_reason is None:
+            battle.win_reason = _extract_win_reason(msg)
+        _update_opponent_tendencies(battle, msg)
+        if ps_websocket_client.consume_reconnect_flag():
+            if _message_indicates_battle_end(battle.battle_tag, msg):
+                winner = _extract_winner_from_msg(msg)
+                logger.info("Winner: {}".format(winner))
+                await ps_websocket_client.send_message(battle.battle_tag, ["gg"])
+                if (
+                    FoulPlayConfig.save_replay == SaveReplay.always
+                    or (
+                        FoulPlayConfig.save_replay == SaveReplay.on_loss
+                        and winner != FoulPlayConfig.username
+                    )
+                    or (
+                        FoulPlayConfig.save_replay == SaveReplay.on_win
+                        and winner == FoulPlayConfig.username
+                    )
+                ):
+                    await ps_websocket_client.save_replay(battle.battle_tag)
+                    battle.replay_saved = True
+                    battle.replay_url = "https://replay.pokemonshowdown.com/{}".format(
+                        battle.battle_tag
+                    )
+                if winner is None:
+                    battle.win_reason = battle.win_reason or "tie"
+                else:
+                    battle.win_reason = battle.win_reason or "normal"
+                _write_battle_summary(
+                    battle, winner, ps_websocket_client.reconnect_count
+                )
+                _clear_last_battle_tag()
+                await ps_websocket_client.leave_battle(battle.battle_tag)
+                return winner
+            logger.warning(
+                "Websocket reconnected during battle %s; resuming battle state",
+                battle.battle_tag,
             )
+            return RECONNECT_RESUME
+        if battle_is_finished(battle.battle_tag, msg):
+            winner = _extract_winner_from_msg(msg)
             logger.info("Winner: {}".format(winner))
             await ps_websocket_client.send_message(battle.battle_tag, ["gg"])
             if (
@@ -532,7 +686,18 @@ async def run_battle_loop(ps_websocket_client, battle):
                 )
             ):
                 await ps_websocket_client.save_replay(battle.battle_tag)
-            _write_battle_summary(battle, winner)
+                battle.replay_saved = True
+                battle.replay_url = "https://replay.pokemonshowdown.com/{}".format(
+                    battle.battle_tag
+                )
+            if winner is None:
+                battle.win_reason = battle.win_reason or "tie"
+            else:
+                battle.win_reason = battle.win_reason or "normal"
+            _write_battle_summary(
+                battle, winner, ps_websocket_client.reconnect_count
+            )
+            _clear_last_battle_tag()
             await ps_websocket_client.leave_battle(battle.battle_tag)
             return winner
         else:
@@ -551,10 +716,11 @@ async def run_battle_loop(ps_websocket_client, battle):
                     )
 
 
-async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
+async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_tag):
     if battle_tag is None:
         raise ValueError("battle_tag is required to resume a battle")
 
+    _write_last_battle_tag(battle_tag)
     await ps_websocket_client.join_room(battle_tag)
 
     backlog_msgs = []
@@ -571,6 +737,21 @@ async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
             continue
         if room_id != battle_tag:
             continue
+        if _message_indicates_battle_end(battle_tag, msg):
+            winner = _extract_winner_from_msg(msg)
+            if constants.TIE_STRING in msg:
+                win_reason = "tie"
+            elif winner is None:
+                win_reason = _extract_win_reason(msg) or "deinit"
+            else:
+                win_reason = _extract_win_reason(msg) or "normal"
+            logger.info(
+                "Battle %s ended during reconnect. Winner: %s",
+                battle_tag,
+                winner,
+            )
+            _clear_last_battle_tag()
+            return None, {"winner": winner, "win_reason": win_reason}
 
         backlog_msgs.append(msg)
         _collect_player_map(msg_lines, player_map)
@@ -671,24 +852,74 @@ async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
             best_move = await async_pick_move(battle)
             await ps_websocket_client.send_message(battle.battle_tag, best_move)
 
-    return await run_battle_loop(ps_websocket_client, battle)
+    return battle, None
 
 
-def _write_battle_summary(battle, winner):
+async def _run_battle_loop_with_auto_resume(
+    ps_websocket_client, battle, pokemon_battle_type
+):
+    while True:
+        result = await run_battle_loop(ps_websocket_client, battle)
+        if result is RECONNECT_RESUME:
+            resumed_battle, finished = await _resume_battle_state(
+                ps_websocket_client, pokemon_battle_type, battle.battle_tag
+            )
+            if finished is not None:
+                battle.win_reason = battle.win_reason or finished.get("win_reason")
+                _write_battle_summary(
+                    battle, finished.get("winner"), ps_websocket_client.reconnect_count
+                )
+                return finished.get("winner")
+            battle = resumed_battle
+            continue
+        return result
+
+
+async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
+    battle, finished = await _resume_battle_state(
+        ps_websocket_client, pokemon_battle_type, battle_tag
+    )
+    if finished is not None:
+        return finished.get("winner")
+    return await _run_battle_loop_with_auto_resume(
+        ps_websocket_client, battle, pokemon_battle_type
+    )
+
+
+def _write_battle_summary(battle, winner, reconnect_count=0):
     if not FoulPlayConfig.summary_path and not FoulPlayConfig.summary_json_path:
         return
 
     turns = battle.turn or 0
+    search_times = list(battle.search_times_ms or [])
+    decision_count = battle.decision_count or len(search_times)
+    search_time_summary = {}
+    if search_times:
+        total_ms = int(sum(search_times))
+        search_time_summary = {
+            "total": total_ms,
+            "avg": round(total_ms / max(decision_count, 1), 2),
+            "max": int(max(search_times)),
+        }
     summary = {
         "battle_tag": battle.battle_tag,
         "format": battle.pokemon_format,
         "winner": winner,
+        "win_reason": battle.win_reason,
         "turns": turns,
         "bot_mode": FoulPlayConfig.bot_mode.name,
         "risk_mode": FoulPlayConfig.risk_mode.name,
         "suggest_only": FoulPlayConfig.suggest_only,
+        "decision_count": decision_count,
+        "search_time_ms": search_time_summary,
+        "reconnect_count": reconnect_count,
+        "replay_saved": battle.replay_saved,
+        "replay_url": battle.replay_url,
+        "opponent_tendencies": battle.opponent_tendencies,
         "timestamp_utc": datetime.utcnow().isoformat() + "Z",
     }
+    if battle.decision_log:
+        summary["decision_log"] = battle.decision_log
     if battle.started_at:
         summary["duration_seconds"] = int(time.time() - battle.started_at)
 
@@ -697,10 +928,16 @@ def _write_battle_summary(battle, winner):
             "battle_tag: {}".format(summary["battle_tag"]),
             "format: {}".format(summary["format"]),
             "winner: {}".format(summary["winner"]),
+            "win_reason: {}".format(summary["win_reason"]),
             "turns: {}".format(summary["turns"]),
             "bot_mode: {}".format(summary["bot_mode"]),
             "risk_mode: {}".format(summary["risk_mode"]),
             "suggest_only: {}".format(summary["suggest_only"]),
+            "decision_count: {}".format(summary["decision_count"]),
+            "search_time_ms: {}".format(summary["search_time_ms"]),
+            "reconnect_count: {}".format(summary["reconnect_count"]),
+            "replay_saved: {}".format(summary["replay_saved"]),
+            "replay_url: {}".format(summary["replay_url"]),
             "timestamp_utc: {}".format(summary["timestamp_utc"]),
         ]
         if "duration_seconds" in summary:
@@ -717,4 +954,6 @@ def _write_battle_summary(battle, winner):
 
 async def pokemon_battle(ps_websocket_client, pokemon_battle_type, team_dict):
     battle = await start_battle(ps_websocket_client, pokemon_battle_type, team_dict)
-    return await run_battle_loop(ps_websocket_client, battle)
+    return await _run_battle_loop_with_auto_resume(
+        ps_websocket_client, battle, pokemon_battle_type
+    )

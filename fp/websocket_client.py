@@ -29,6 +29,8 @@ class PSWebsocketClient:
     last_challenge_time = 0
     user_id = None
     rooms = None
+    reconnected = False
+    reconnect_count = 0
 
     @classmethod
     async def create(cls, username, password, address):
@@ -36,6 +38,8 @@ class PSWebsocketClient:
         self.username = username
         self.password = password
         self.address = address
+        self.reconnected = False
+        self.reconnect_count = 0
         await self._connect()
         self.login_uri = "https://play.pokemonshowdown.com/api/login"
         self.rooms = set()
@@ -157,6 +161,8 @@ class PSWebsocketClient:
                     await self.avatar(FoulPlayConfig.avatar)
                 for room in list(self.rooms):
                     await self.join_room(room)
+                self.reconnected = True
+                self.reconnect_count += 1
                 logger.info("Reconnected successfully")
                 return
             except Exception as reconnect_exc:
@@ -167,6 +173,12 @@ class PSWebsocketClient:
 
     async def update_team(self, team):
         await self.send_message("", ["/utm {}".format(team)])
+
+    def consume_reconnect_flag(self) -> bool:
+        if self.reconnected:
+            self.reconnected = False
+            return True
+        return False
 
     async def challenge_user(self, user_to_challenge, battle_format):
         logger.info("Challenging {}...".format(user_to_challenge))
