@@ -64,11 +64,14 @@ class BotModes(Enum):
     resume_battle = auto()
 
 
+_enum_auto = auto
+
+
 class RiskModes(Enum):
-    auto = auto()
-    safe = auto()
-    balanced = auto()
-    aggressive = auto()
+    auto = _enum_auto()
+    safe = _enum_auto()
+    balanced = _enum_auto()
+    aggressive = _enum_auto()
 
 
 class _FoulPlayConfig:
