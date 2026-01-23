@@ -628,7 +628,6 @@ async def start_battle(ps_websocket_client, pokemon_battle_type, team_dict):
 
 
 async def run_battle_loop(ps_websocket_client, battle):
-    ps_websocket_client.consume_reconnect_flag()
     while True:
         msg = await ps_websocket_client.receive_message()
         if battle.win_reason is None:
@@ -923,7 +922,15 @@ def _write_battle_summary(battle, winner, reconnect_count=0):
     if battle.started_at:
         summary["duration_seconds"] = int(time.time() - battle.started_at)
 
+    def ensure_parent_dir(path):
+        if not path:
+            return
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
     if FoulPlayConfig.summary_path:
+        ensure_parent_dir(FoulPlayConfig.summary_path)
         lines = [
             "battle_tag: {}".format(summary["battle_tag"]),
             "format: {}".format(summary["format"]),
@@ -948,6 +955,7 @@ def _write_battle_summary(battle, winner, reconnect_count=0):
             f.write("\n".join(lines) + "\n\n")
 
     if FoulPlayConfig.summary_json_path:
+        ensure_parent_dir(FoulPlayConfig.summary_json_path)
         with open(FoulPlayConfig.summary_json_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(summary) + "\n")
 

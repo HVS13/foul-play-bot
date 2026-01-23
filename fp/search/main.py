@@ -2,6 +2,7 @@ import atexit
 import logging
 import random
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from copy import deepcopy
 
 from constants import BattleType
@@ -41,6 +42,14 @@ def _get_process_pool() -> ProcessPoolExecutor:
         _executor = ProcessPoolExecutor(max_workers=FoulPlayConfig.parallelism)
         _executor_workers = FoulPlayConfig.parallelism
     return _executor
+
+
+def _reset_process_pool():
+    global _executor, _executor_workers
+    if _executor is not None:
+        _executor.shutdown(wait=False, cancel_futures=True)
+    _executor = ProcessPoolExecutor(max_workers=FoulPlayConfig.parallelism)
+    _executor_workers = FoulPlayConfig.parallelism
 
 
 def compute_final_policy(
@@ -394,17 +403,29 @@ def _policy_confidence_ratio(final_policy: list[tuple[str, float]]) -> float:
 
 
 def _run_mcts_batch(battles, search_time_ms: int):
-    executor = _get_process_pool()
-    futures = []
-    for index, (b, chance) in enumerate(battles):
-        fut = executor.submit(
-            get_result_from_mcts,
-            battle_to_poke_engine_state(b).to_string(),
-            search_time_ms,
-            index,
-        )
-        futures.append((fut, chance, index))
-    return [(fut.result(), chance, index) for (fut, chance, index) in futures]
+    for attempt in range(2):
+        executor = _get_process_pool()
+        futures = []
+        try:
+            for index, (b, chance) in enumerate(battles):
+                fut = executor.submit(
+                    get_result_from_mcts,
+                    battle_to_poke_engine_state(b).to_string(),
+                    search_time_ms,
+                    index,
+                )
+                futures.append((fut, chance, index))
+            return [(fut.result(), chance, index) for (fut, chance, index) in futures]
+        except BrokenProcessPool:
+            logger.warning("MCTS worker pool crashed; recreating pool.")
+            _reset_process_pool()
+            if attempt == 1:
+                raise
+        except Exception:
+            if attempt == 0:
+                raise
+            _reset_process_pool()
+            raise
 
 
 def _get_hp_pct(pokemon):
