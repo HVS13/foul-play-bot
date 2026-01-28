@@ -40,9 +40,13 @@ class PSWebsocketClient:
         self.address = address
         self.reconnected = False
         self.reconnect_count = 0
-        await self._connect()
-        self.login_uri = "https://play.pokemonshowdown.com/api/login"
         self.rooms = set()
+        self.login_uri = (
+            "https://play.pokemonshowdown.com/api/login"
+            if password
+            else "https://play.pokemonshowdown.com/action.php?"
+        )
+        await self._connect()
         return self
 
     async def _connect(self):
@@ -110,30 +114,51 @@ class PSWebsocketClient:
     async def login(self):
         logger.info("Logging in...")
         client_id, challstr = await self.get_id_and_challstr()
-        response = requests.post(
-            self.login_uri,
-            data={
-                "name": self.username,
-                "pass": self.password,
-                "challstr": "|".join([client_id, challstr]),
-            },
-        )
+
+        guest_login = self.password is None
+
+        if guest_login:
+            response = requests.post(
+                self.login_uri,
+                data={
+                    "act": "getassertion",
+                    "userid": self.username,
+                    "challstr": "|".join([client_id, challstr]),
+                },
+            )
+        else:
+            response = requests.post(
+                self.login_uri,
+                data={
+                    "name": self.username,
+                    "pass": self.password,
+                    "challstr": "|".join([client_id, challstr]),
+                },
+            )
 
         if response.status_code != 200:
-            logger.error("Could not log-in\nDetails:\n{}".format(response.content))
-            raise LoginError("Could not log-in")
+            logger.error(
+                "Could not get assertion\nDetails:\n{}".format(response.content)
+            )
+            raise LoginError("Could not get assertion")
 
-        response_json = json.loads(response.text[1:])
-        if "actionsuccess" not in response_json:
-            logger.error("Login Unsuccessful: {}".format(response_json))
-            raise LoginError("Could not log-in: {}".format(response_json))
+        if guest_login:
+            assertion = response.text
+        else:
+            response_json = json.loads(response.text[1:])
+            if "actionsuccess" not in response_json:
+                logger.error("Login Unsuccessful: {}".format(response_json))
+                raise LoginError("Could not log-in: {}".format(response_json))
+            assertion = response_json.get("assertion")
 
-        assertion = response_json.get("assertion")
         message = ["/trn " + self.username + ",0," + assertion]
         logger.info("Successfully logged in")
         await self.send_message("", message)
         await asyncio.sleep(3)
-        self.user_id = response_json["curuser"]["userid"]
+        if guest_login:
+            self.user_id = self.username
+        else:
+            self.user_id = response_json["curuser"]["userid"]
         return self.user_id
 
     async def _reconnect(self, exc):
