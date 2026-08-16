@@ -26,5 +26,8 @@ def update_opponent_tendencies(battle, msg: str) -> None:
         elif action == "move":
             tendencies["moves"] += 1
             tendencies["actions"] += 1
-            if len(split_line) > 3 and normalize_name(split_line[3]) in PROTECT_MOVE_IDS:
+            if (
+                len(split_line) > 3
+                and normalize_name(split_line[3]) in PROTECT_MOVE_IDS
+            ):
                 tendencies["protects"] += 1
