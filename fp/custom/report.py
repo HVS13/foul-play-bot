@@ -50,8 +50,13 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
     durations = []
     decision_times = []
     confidence_ratios = []
+    sampled_states = []
+    mcts_time_per_state = []
+    search_pass_observations = 0
+    extra_pass_decisions = 0
     risk_modes = Counter()
     decision_risk_modes = Counter()
+    resolved_risk_modes = Counter()
     win_reasons = Counter()
     reconnects = 0
     room_renames = 0
@@ -85,9 +90,20 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
             ratio = _decision_confidence(decision)
             if ratio is not None:
                 confidence_ratios.append(ratio)
+            if decision.get("sampled_states") is not None:
+                sampled_states.append(float(decision["sampled_states"]))
+            if decision.get("mcts_time_per_state_ms") is not None:
+                mcts_time_per_state.append(float(decision["mcts_time_per_state_ms"]))
+            if decision.get("search_passes") is not None:
+                search_pass_observations += 1
+                if int(decision["search_passes"]) > 1:
+                    extra_pass_decisions += 1
             configured_risk = decision.get("configured_risk_mode")
             if configured_risk:
                 decision_risk_modes[str(configured_risk)] += 1
+            resolved_risk = decision.get("resolved_risk_mode")
+            if resolved_risk:
+                resolved_risk_modes[str(resolved_risk)] += 1
             time_remaining = decision.get("time_remaining")
             if time_remaining is not None and float(time_remaining) <= 30:
                 timer_pressure_decisions += 1
@@ -112,6 +128,23 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
             ),
             "max": round(max(decision_times), 2) if decision_times else None,
         },
+        "search_effort": {
+            "avg_sampled_states": (
+                round(statistics.mean(sampled_states), 2) if sampled_states else None
+            ),
+            "avg_mcts_time_per_state_ms": (
+                round(statistics.mean(mcts_time_per_state), 2)
+                if mcts_time_per_state
+                else None
+            ),
+            "extra_pass_decisions": extra_pass_decisions,
+            "pass_observations": search_pass_observations,
+            "extra_pass_pct": (
+                round(100 * extra_pass_decisions / search_pass_observations, 2)
+                if search_pass_observations
+                else None
+            ),
+        },
         "confidence": {
             "observations": len(confidence_ratios),
             "low_confidence_count": low_confidence,
@@ -131,6 +164,7 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
         "timer_pressure_decisions": timer_pressure_decisions,
         "risk_modes": dict(risk_modes),
         "decision_risk_modes": dict(decision_risk_modes),
+        "resolved_risk_modes": dict(resolved_risk_modes),
         "win_reasons": dict(win_reasons),
     }
 
@@ -174,6 +208,25 @@ def format_text(report: dict) -> str:
             **{key: "n/a" if value is None else value for key, value in search.items()}
         )
     )
+    effort = report["search_effort"]
+    retry_pct = effort["extra_pass_pct"]
+    lines.append(
+        "Search effort: avg states {states} | avg MCTS ms/state {mcts} | retries {retry}/{observations} ({pct})".format(
+            states=(
+                "n/a"
+                if effort["avg_sampled_states"] is None
+                else effort["avg_sampled_states"]
+            ),
+            mcts=(
+                "n/a"
+                if effort["avg_mcts_time_per_state_ms"] is None
+                else effort["avg_mcts_time_per_state_ms"]
+            ),
+            retry=effort["extra_pass_decisions"],
+            observations=effort["pass_observations"],
+            pct="n/a" if retry_pct is None else "{}%".format(retry_pct),
+        )
+    )
     confidence = report["confidence"]
     low_pct = confidence["low_confidence_pct"]
     lines.append(
@@ -196,6 +249,8 @@ def format_text(report: dict) -> str:
     lines.append("Risk modes by battle: {}".format(report["risk_modes"]))
     if report["decision_risk_modes"]:
         lines.append("Risk modes by decision: {}".format(report["decision_risk_modes"]))
+    if report["resolved_risk_modes"]:
+        lines.append("Resolved risk modes: {}".format(report["resolved_risk_modes"]))
     lines.append("Win reasons: {}".format(report["win_reasons"]))
     if report["avg_turns"] is not None:
         lines.append("Average turns: {}".format(report["avg_turns"]))
