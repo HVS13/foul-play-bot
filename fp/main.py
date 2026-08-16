@@ -3,22 +3,17 @@ import logging
 from copy import deepcopy
 
 from fp.config import FoulPlayConfig, init_logging, BotModes
-
-from fp.modes import battle_mode
-from fp.teams import load_team, TeamListIterator
-from fp.run_battle import pokemon_battle
-from fp.websocket_client import PSWebsocketClient
-
-from fp.data import all_move_json
-from fp.data import pokedex
+from fp.data import all_move_json, pokedex
 from fp.data.mods.apply_mods import apply_mods
+from fp.modes import battle_mode
+from fp.run_battle import pokemon_battle, resume_battle
+from fp.teams import load_team, TeamListIterator
+from fp.websocket_client import PSWebsocketClient
 
 logger = logging.getLogger(__name__)
 
 
 def check_dictionaries_are_unmodified(original_pokedex, original_move_json):
-    # The bot should not modify the data dictionaries
-    # This is a "just-in-case" check to make sure and will stop the bot if it mutates either of them
     if original_move_json != all_move_json:
         logger.critical(
             "Move JSON changed!\nDumping modified version to `modified_moves.json`"
@@ -51,11 +46,21 @@ async def run_foul_play():
     ps_websocket_client = await PSWebsocketClient.create(
         FoulPlayConfig.username, FoulPlayConfig.password, FoulPlayConfig.websocket_uri
     )
-
     FoulPlayConfig.user_id = await ps_websocket_client.login()
 
     if FoulPlayConfig.avatar is not None:
         await ps_websocket_client.avatar(FoulPlayConfig.avatar)
+
+    if FoulPlayConfig.bot_mode == BotModes.resume_battle:
+        winner = await resume_battle(
+            ps_websocket_client,
+            FoulPlayConfig.pokemon_format,
+            FoulPlayConfig.battle_tag,
+        )
+        logger.info("Resumed battle winner: {}".format(winner))
+        check_dictionaries_are_unmodified(original_pokedex, original_move_json)
+        await ps_websocket_client.close()
+        return
 
     team_iterator = (
         None
@@ -68,6 +73,7 @@ async def run_foul_play():
     team_file_name = "None"
     team_dict = None
     mode = battle_mode(FoulPlayConfig.format_spec.battle_type)
+
     while True:
         if mode.requires_team:
             team_name = (
