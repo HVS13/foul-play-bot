@@ -11,6 +11,7 @@ from fp.custom.decisions import analyze_decision
 logger = logging.getLogger(__name__)
 
 LAST_BATTLE_TAG_PATH = os.path.join("logs", "last_battle_tag.txt")
+DEFAULT_GUI_SUMMARY_JSON_PATH = os.path.join("logs", "battle_summary.jsonl")
 
 
 def write_last_battle_tag(battle_tag: str | None) -> None:
@@ -121,8 +122,18 @@ def _ensure_parent(path: str | None) -> None:
         os.makedirs(parent, exist_ok=True)
 
 
+def _summary_json_path() -> str | None:
+    configured = getattr(FoulPlayConfig, "summary_json_path", None)
+    if configured:
+        return configured
+    if getattr(FoulPlayConfig, "gui", False):
+        return DEFAULT_GUI_SUMMARY_JSON_PATH
+    return None
+
+
 def write_battle_summary(battle, winner: str | None, reconnect_count: int = 0) -> None:
-    if not FoulPlayConfig.summary_path and not FoulPlayConfig.summary_json_path:
+    summary_json_path = _summary_json_path()
+    if not FoulPlayConfig.summary_path and not summary_json_path:
         return
 
     search_times = list(battle.search_times_ms or [])
@@ -169,7 +180,7 @@ def write_battle_summary(battle, winner: str | None, reconnect_count: int = 0) -
         with open(FoulPlayConfig.summary_path, "a", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n\n")
 
-    if FoulPlayConfig.summary_json_path:
-        _ensure_parent(FoulPlayConfig.summary_json_path)
-        with open(FoulPlayConfig.summary_json_path, "a", encoding="utf-8") as handle:
+    if summary_json_path:
+        _ensure_parent(summary_json_path)
+        with open(summary_json_path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(summary) + "\n")
