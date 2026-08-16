@@ -3,6 +3,7 @@ import logging
 from copy import deepcopy
 
 from fp.config import FoulPlayConfig, init_logging, BotModes
+from fp.custom.dashboard import maybe_start_dashboard
 from fp.data import all_move_json, pokedex
 from fp.data.mods.apply_mods import apply_mods
 from fp.modes import battle_mode
@@ -38,6 +39,7 @@ def check_dictionaries_are_unmodified(original_pokedex, original_move_json):
 async def run_foul_play():
     FoulPlayConfig.configure()
     init_logging(FoulPlayConfig.log_level, FoulPlayConfig.log_to_file)
+    maybe_start_dashboard()
     apply_mods(FoulPlayConfig.format_spec)
 
     original_pokedex = deepcopy(pokedex)
