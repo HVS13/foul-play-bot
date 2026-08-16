@@ -1,64 +1,77 @@
-# Foul Play ![umbreon](https://play.pokemonshowdown.com/sprites/xyani/umbreon.gif)
-A Pokémon battle-bot that can play battles on [Pokemon Showdown](https://pokemonshowdown.com/).
+# Foul Play
 
-Foul Play can play single battles in all generations
-though currently dynamax and z-moves are not supported.
+A Pokémon Showdown battle bot powered by [poke-engine](https://github.com/pmariglia/poke-engine).
 
-![badge](https://github.com/pmariglia/foul-play/actions/workflows/ci.yml/badge.svg)
+This repository tracks [`pmariglia/foul-play`](https://github.com/pmariglia/foul-play) and keeps a small set of local features on top. The local changes are intentionally isolated so upstream updates are easier to merge.
 
-## Python version
-Requires Python 3.11+.
+![CI](https://github.com/HVS13/foul-play-bot/actions/workflows/ci.yml/badge.svg)
 
-## Getting Started
+## Requirements
 
-### Configuration
+- Python 3.11+
+- Rust when `poke-engine` must be built locally
 
-Command-line arguments are used to configure Foul Play
+Install dependencies:
 
-use `python run.py --help` to see all options.
+```bash
+pip install -r requirements.txt
+```
 
-#### All CLI options (current)
+For development:
 
-Required (unless provided by `--config`):
-- `--websocket-uri` (string)
-- `--ps-username` (string)
-- `--ps-password` (string)
-- `--bot-mode` (`challenge_user|accept_challenge|search_ladder|resume_battle`)
-- `--pokemon-format` (string, e.g. `gen9randombattle`)
+```bash
+pip install -r requirements-dev.txt
+```
 
-Optional:
-- `--config` (path to `.toml` or `.json`; default: `None`)
-- `--ps-avatar` (string; default: `None`)
-- `--user-to-challenge` (string; required when `--bot-mode challenge_user`)
-- `--smogon-stats-format` (string; default: `None`)
-- `--search-time-ms` (int; default: `100`)
-- `--search-parallelism` (int; default: `1`)
-- `--auto-parallelism` / `--no-auto-parallelism` (bool; default: `false`)
-- `--parallelism-cap` (int; default: `8`)
-- `--run-count` (int; default: `1`)
-- `--team-name` (string; default: `--pokemon-format`)
-- `--save-replay` (`always|never|on_loss|on_win`; default: `never`)
-- `--battle-timer` (`on|off|none`; default: `on`)
-- `--suggest-only` / `--no-suggest-only` (bool; default: `false`)
-- `--room-name` (string; used by `accept_challenge`)
-- `--battle-tag` (string; used by `resume_battle`)
-- `--battle-url` (string; used by `resume_battle`)
-- `--risk-mode` (`auto|safe|balanced|aggressive`; default: `balanced`)
-- `--summary-path` (string; default: `None`)
-- `--summary-json-path` (string; default: `None`)
-- `--reconnect-retries` (int; default: `5`)
-- `--reconnect-backoff-seconds` (float; default: `1.0`)
-- `--reconnect-max-backoff-seconds` (float; default: `30.0`)
-- `--log-level` (string; default: `DEBUG`)
-- `--log-to-file` / `--no-log-to-file` (bool; default: `false`)
+## Configuration
 
-#### Config file (TOML or JSON)
+Run `python run.py --help` for the authoritative option list.
 
-You can pass a config file with `--config`, and still override any setting via CLI.
+Required unless supplied by `--config`:
+
+- `--websocket-uri`, such as `ps`, `pokemonshowdown`, `local`, or a full websocket URI
+- `--ps-username`
+- `--bot-mode`: `challenge_user`, `accept_challenge`, `search_ladder`, or `resume_battle`
+- `--pokemon-format`, for example `gen9randombattle`
+
+`--ps-password` is optional. When omitted, the upstream guest-login flow is used.
+
+Important optional settings:
+
+- `--config PATH`: TOML or JSON configuration file; explicit CLI arguments override file values
+- `--ps-avatar`
+- `--user-to-challenge`
+- `--smogon-stats-format`
+- `--search-time-ms` (default `100`)
+- `--search-parallelism` (default `1`)
+- `--team-preview-search-time-ms`
+- `--team-preview-search-parallelism`
+- `--search-threads` (default `1`)
+- `--auto-parallelism` / `--no-auto-parallelism`
+- `--parallelism-cap` (default `8`)
+- `--run-count` (default `1`)
+- `--team-name`
+- `--team-list`
+- `--save-replay`: `always`, `never`, `on_loss`, or `on_win`
+- `--battle-timer`: `on`, `off`, or `none`
+- `--suggest-only` / `--no-suggest-only`
+- `--room-name`
+- `--battle-tag` or `--battle-url` for `resume_battle`
+- `--risk-mode`: `auto`, `safe`, `balanced`, or `aggressive`
+- `--summary-path`
+- `--summary-json-path`
+- `--reconnect-retries` (default `5`)
+- `--reconnect-backoff-seconds` (default `1.0`)
+- `--reconnect-max-backoff-seconds` (default `30.0`)
+- `--log-level`
+- `--log-to-file` / `--no-log-to-file`
+
+### Config files
 
 Example `config.toml`:
+
 ```toml
-websocket_uri = "wss://sim3.psim.us/showdown/websocket"
+websocket_uri = "ps"
 ps_username = "My Username"
 ps_password = "sekret"
 bot_mode = "search_ladder"
@@ -71,218 +84,182 @@ summary_path = "logs/battle_summary.txt"
 summary_json_path = "logs/battle_summary.jsonl"
 ```
 
-Example usage:
+CLI values take precedence:
+
 ```bash
 python run.py --config config.toml --risk-mode aggressive
 ```
 
-#### Bot modes
+## Local features in this repo
 
-- `search_ladder`: queue for a ranked match
-- `challenge_user`: challenge a specific user (requires `--user-to-challenge`)
-- `accept_challenge`: wait for challenges (optionally `--room-name`)
-- `resume_battle`: take over an in-progress battle (requires `--battle-tag` or `--battle-url`)
+### Resume an active battle
 
-Note: `resume_battle` logs in as the account that is already in the battle, which will disconnect any other active session for that account.
-
-#### Risk modes
-
-Control how adventurous the bot is when picking among top moves:
-
-- `auto`: adjust risk based on the current battle state
-- `safe`: pick the most reliable move (lowest variance)
-- `balanced`: default tradeoff of safety and exploration
-- `aggressive`: consider a wider set of moves to chase higher upside
-
-Set with `--risk-mode auto|safe|balanced|aggressive` (default: `balanced`).
-`auto` leans safe when ahead on remaining Pokemon/HP and aggressive when behind.
-
-#### Search and QoL options
-
-- `--auto-parallelism` and `--parallelism-cap` to scale search by CPU.
-- Dynamic search time increases in late-game/low-HP situations by default, and now also adapts to branching factor; low-confidence policies trigger a small extra search when time allows.
-- `--summary-path` writes a text summary per battle (appends).
-- `--summary-json-path` writes JSONL summaries per battle (appends), including decision logs, search timing, win reason, and replay URL (when saved).
-- `--reconnect-retries`, `--reconnect-backoff-seconds`, `--reconnect-max-backoff-seconds` control websocket reconnect behavior.
-- Auto-resume: on websocket reconnect during a battle, the bot rebuilds state and continues. The current battle tag is persisted to `logs/last_battle_tag.txt`.
-- `--suggest-only` prints top move options with short tags (e.g. `ko`, `setup`, `pivot`).
-- Opponent tendency tracking: the bot tracks opponent switch/protect rates during a battle and slightly biases move selection; stats are included in JSON summaries.
-
-#### Defaults for new options
-
-- `--config`: `None` (disabled)
-- `--risk-mode`: `balanced`
-- `--auto-parallelism`: `false`
-- `--parallelism-cap`: `8`
-- `--summary-path`: `None` (disabled)
-- `--summary-json-path`: `None` (disabled)
-- `--reconnect-retries`: `5`
-- `--reconnect-backoff-seconds`: `1.0`
-- `--reconnect-max-backoff-seconds`: `30.0`
-
-### Running Locally
-
-**1. Clone**
-
-Clone the repository with `git clone https://github.com/pmariglia/foul-play.git`
-
-**2. Install Requirements**
-
-Install the requirements with `pip install -r requirements.txt`.
-
-Note: Requires Rust to be installed on your machine to build the engine.
-
-**4. Run**
-
-Run with `python run.py`
-
-Here is a minimal example that plays a gen9randombattle on Pokemon Showdown:
-```bash
-python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode search_ladder \
---pokemon-format gen9randombattle
-```
-
-More examples:
-
-Accept challenges in a room:
-```bash
-python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode accept_challenge \
---pokemon-format gen9randombattle \
---room-name lobby
-```
-
-Challenge a specific user:
-```bash
-python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode challenge_user \
---user-to-challenge 'Opponent Name' \
---pokemon-format gen9randombattle
-```
-
-Resume an ongoing battle by tag or URL:
-```bash
-python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode resume_battle \
---pokemon-format gen9ou \
---battle-tag battle-gen9ou-123456
-```
+Use the same Pokémon Showdown account that is already in the battle:
 
 ```bash
 python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode resume_battle \
---pokemon-format gen9ou \
---battle-url https://play.pokemonshowdown.com/battle-gen9ou-123456
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode resume_battle \
+  --pokemon-format gen9ou \
+  --battle-tag battle-gen9ou-123456
 ```
 
-Add `--suggest-only` to log suggested moves without sending them.
+A full battle URL also works:
 
-Realistic example with new options enabled:
 ```bash
 python run.py \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode search_ladder \
---pokemon-format gen9ou \
---risk-mode auto \
---auto-parallelism \
---parallelism-cap 6 \
---summary-path logs/battle_summary.txt \
---summary-json-path logs/battle_summary.jsonl \
---reconnect-retries 6 \
---reconnect-backoff-seconds 1.5 \
---reconnect-max-backoff-seconds 20
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode resume_battle \
+  --pokemon-format gen9ou \
+  --battle-url https://play.pokemonshowdown.com/battle-gen9ou-123456
 ```
 
-### Running with Docker
+The current battle tag is persisted to `logs/last_battle_tag.txt`. If the websocket disconnects, the client reconnects, rejoins the battle, and attempts to rebuild state automatically.
 
-**1. Clone the repository**
+### Risk modes
 
-`git clone https://github.com/pmariglia/foul-play.git`
+`--risk-mode balanced` stays close to upstream move selection. Other modes change how the final MCTS policy is sampled:
 
-**2. Build the Docker image**
+- `safe`: favors the highest-weight move
+- `balanced`: normal near-best exploration
+- `aggressive`: considers a wider near-best set
+- `auto`: switches among those behaviors based on remaining Pokémon and HP position
 
-Use the `Makefile` to build a Docker image
-```shell
+### Suggest-only mode
+
+Add `--suggest-only` to calculate and log decisions without sending `/choose`, `/switch`, or `/team` commands. Suggestions include short tags such as `attack`, `ko`, `setup`, `pivot`, and `heal` when available.
+
+### Search and telemetry
+
+The local search layer adds:
+
+- CPU-based auto parallelism with a configurable cap
+- dynamic search effort based on turn, HP, remaining Pokémon, timer pressure, and branching factor
+- an extra search pass when the leading policy choices are unusually close
+- persistent MCTS process-pool reuse with recovery after `BrokenProcessPool`
+- light opponent switch/protect tendency tracking and policy bias
+
+Battle summaries can be appended as text with `--summary-path` and as JSONL with `--summary-json-path`. JSON summaries include decision logs, search timing, result information, reconnect count, replay metadata, and opponent tendency counters.
+
+## Common runs
+
+Search the ladder:
+
+```bash
+python run.py \
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode search_ladder \
+  --pokemon-format gen9randombattle
+```
+
+Accept challenges:
+
+```bash
+python run.py \
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode accept_challenge \
+  --pokemon-format gen9randombattle \
+  --room-name lobby
+```
+
+Challenge another user:
+
+```bash
+python run.py \
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode challenge_user \
+  --user-to-challenge 'Opponent Name' \
+  --pokemon-format gen9randombattle
+```
+
+## Docker
+
+Build with the Makefile:
+
+```bash
 make docker
 ```
 
-or for a specific generation:
-```shell
+Or for a specific generation:
+
+```bash
 make docker GEN=gen4
 ```
 
-**3. Run the Docker Image**
+Example:
+
 ```bash
 docker run --rm --network host foul-play:latest \
---websocket-uri wss://sim3.psim.us/showdown/websocket \
---ps-username 'My Username' \
---ps-password sekret \
---bot-mode search_ladder \
---pokemon-format gen9randombattle
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode search_ladder \
+  --pokemon-format gen9randombattle
 ```
 
 ## Engine
 
-This project uses [poke-engine](https://github.com/pmariglia/poke-engine) to search through battles.
-See [the engine docs](https://poke-engine.readthedocs.io/en/latest/) for more information.
+This project uses [poke-engine](https://github.com/pmariglia/poke-engine) for battle search. See the [poke-engine documentation](https://poke-engine.readthedocs.io/en/latest/) for engine details.
 
-The engine must be built from source if installing locally so you must have rust installed on your machine.
+To rebuild the engine for another generation:
 
-### Re-Installing the Engine
-
-It is common to want to re-install the engine for different generations of Pokémon.
-
-`pip` will used cached .whl artifacts when installing packages
-and cannot detect the `--config-settings` flag that was used to build the engine.
-
-The following command will ensure that the engine is re-installed properly:
-```shell
-pip uninstall -y poke-engine && pip install -v --force-reinstall --no-cache-dir poke-engine --config-settings="build-args=--features poke-engine/<GENERATION> --no-default-features"
+```bash
+pip uninstall -y poke-engine && \
+pip install -v --force-reinstall --no-cache-dir poke-engine \
+  --config-settings="build-args=--features poke-engine/<GENERATION> --no-default-features"
 ```
 
-Or using the Makefile:
-```shell
+Or:
+
+```bash
 make poke_engine GEN=<generation>
 ```
 
-For example, to re-install the engine for generation 4:
-```shell
-make poke_engine GEN=gen4
-```
+## Updating from upstream
 
-## Updating from the original repo
+This repository is an independent copy, not a GitHub fork. Keep the original repository configured as an `upstream` remote.
 
-If you cloned this project and pushed it to your own GitHub repo, you can keep the original author as an `upstream` remote and pull updates.
+One-time setup:
 
-Add the original repo as `upstream` once:
 ```bash
+git clone https://github.com/HVS13/foul-play-bot.git
+cd foul-play-bot
 git remote add upstream https://github.com/pmariglia/foul-play.git
 git fetch upstream
 ```
 
-When you want to update your repo:
+For each upstream update, use a sync branch:
+
 ```bash
+git checkout main
+git pull origin main
+git checkout -b sync/upstream-YYYY-MM
 git fetch upstream
 git merge upstream/main
-git push origin main
 ```
 
-If the original repo uses `master` instead of `main`, replace `upstream/main` with `upstream/master`.
+Resolve conflicts by keeping the current upstream architecture, then reapply only the local hook behavior. Most local-only logic now lives in `fp/custom_features.py`; configuration is in `fp/config.py`; policy behavior is in `fp/search/main.py`; resume/reconnect orchestration is in `fp/run_battle.py`.
+
+Validate before merging:
+
+```bash
+ruff check
+ruff format --check --diff
+pytest tests
+```
+
+Then push the sync branch, open a PR into `main`, wait for CI, and merge it:
+
+```bash
+git push -u origin sync/upstream-YYYY-MM
+```
