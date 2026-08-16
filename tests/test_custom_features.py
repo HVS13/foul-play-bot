@@ -152,9 +152,7 @@ def test_rejected_command_is_retried_in_renamed_room():
     client = PSWebsocketClient()
     client.rooms = {new_room}
     client.room_aliases = {old_room: new_room}
-    client.recent_room_commands = {
-        "/choose": (old_room, ["/choose move tackle", "7"])
-    }
+    client.recent_room_commands = {"/choose": (old_room, ["/choose move tackle", "7"])}
     sent = []
 
     async def fake_send(room, message_list):
