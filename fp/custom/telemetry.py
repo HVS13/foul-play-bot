@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import platform
 import time
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 
 from fp import constants
 from fp.config import FoulPlayConfig, SaveReplay
@@ -78,6 +80,12 @@ def log_suggested_moves(
         logger.info("\t{}%: {}{}".format(round(weight * 100, 3), move, tag_string))
 
 
+def _policy_confidence(policy) -> float | None:
+    if not policy or len(policy) < 2 or policy[1][1] <= 0:
+        return None
+    return round(policy[0][1] / policy[1][1], 4)
+
+
 def record_decision(battle, decision: str, elapsed_ms: int, policy=None) -> dict:
     battle.search_times_ms.append(elapsed_ms)
     battle.decision_count += 1
@@ -85,8 +93,12 @@ def record_decision(battle, decision: str, elapsed_ms: int, policy=None) -> dict
     decision_info = analyze_decision(battle, decision, include_ko=True)
     entry = {
         "turn": battle.turn or 0,
+        "rqid": battle.rqid,
+        "time_remaining": battle.time_remaining,
         "decision": decision,
         "search_time_ms": elapsed_ms,
+        "configured_risk_mode": FoulPlayConfig.risk_mode.name,
+        "confidence_ratio": _policy_confidence(policy),
         "tags": list(decision_info.tags),
     }
     if policy:
@@ -96,7 +108,7 @@ def record_decision(battle, decision: str, elapsed_ms: int, policy=None) -> dict
                 "weight": round(weight, 6),
                 "tags": list(analyze_decision(battle, move, include_ko=False).tags),
             }
-            for move, weight in policy[:3]
+            for move, weight in policy[:5]
         ]
     battle.decision_log.append(entry)
     return entry
@@ -131,6 +143,30 @@ def _summary_json_path() -> str | None:
     return None
 
 
+def _package_version(package_name: str) -> str | None:
+    try:
+        return version(package_name)
+    except PackageNotFoundError:
+        return None
+
+
+def _search_config_snapshot() -> dict:
+    return {
+        "search_time_ms": FoulPlayConfig.search_time_ms,
+        "parallelism": FoulPlayConfig.parallelism,
+        "search_threads": FoulPlayConfig.search_threads,
+        "team_preview_search_time_ms": FoulPlayConfig.team_preview_search_time_ms,
+        "team_preview_search_parallelism": FoulPlayConfig.team_preview_search_parallelism,
+    }
+
+
+def _runtime_snapshot() -> dict:
+    return {
+        "python": platform.python_version(),
+        "poke_engine": _package_version("poke-engine"),
+    }
+
+
 def write_battle_summary(battle, winner: str | None, reconnect_count: int = 0) -> None:
     summary_json_path = _summary_json_path()
     if not FoulPlayConfig.summary_path and not summary_json_path:
@@ -148,7 +184,7 @@ def write_battle_summary(battle, winner: str | None, reconnect_count: int = 0) -
         }
 
     summary = {
-        "schema_version": 1,
+        "schema_version": 2,
         "battle_tag": battle.battle_tag,
         "format": battle.pokemon_format,
         "winner": winner,
@@ -159,7 +195,10 @@ def write_battle_summary(battle, winner: str | None, reconnect_count: int = 0) -
         "suggest_only": FoulPlayConfig.suggest_only,
         "decision_count": decision_count,
         "search_time_ms": search_summary,
+        "search_config": _search_config_snapshot(),
+        "runtime": _runtime_snapshot(),
         "reconnect_count": reconnect_count,
+        "room_rename_count": getattr(battle, "room_rename_count", 0),
         "replay_saved": battle.replay_saved,
         "replay_url": battle.replay_url,
         "opponent_tendencies": battle.opponent_tendencies,
