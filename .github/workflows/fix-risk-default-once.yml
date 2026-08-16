@@ -1,0 +1,63 @@
+name: Fix risk default once
+
+on:
+  push:
+    branches:
+      - agent/upstream-sync-2026-08
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/upstream-sync-2026-08
+          fetch-depth: 0
+      - name: Patch and validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("fp/search/main.py")
+          text = path.read_text()
+          old = '''def _resolve_risk_mode(battle: Battle | None) -> RiskModes:
+              if FoulPlayConfig.risk_mode != RiskModes.auto:
+                  return FoulPlayConfig.risk_mode
+          '''
+          new = '''def _configured_risk_mode() -> RiskModes:
+              return getattr(FoulPlayConfig, "risk_mode", RiskModes.balanced)
+
+
+          def _resolve_risk_mode(battle: Battle | None) -> RiskModes:
+              configured_risk_mode = _configured_risk_mode()
+              if configured_risk_mode != RiskModes.auto:
+                  return configured_risk_mode
+          '''
+          if old not in text:
+              raise SystemExit("risk resolver insertion point not found")
+          text = text.replace(old, new, 1)
+          old2 = '''    choice = select_move_from_policy(
+                  final_policy, resolved_risk, FoulPlayConfig.risk_mode
+              )
+          '''
+          new2 = '''    choice = select_move_from_policy(
+                  final_policy, resolved_risk, _configured_risk_mode()
+              )
+          '''
+          if old2 not in text:
+              raise SystemExit("risk selection insertion point not found")
+          path.write_text(text.replace(old2, new2, 1))
+          PY
+          python -m pip install -r requirements-dev.txt
+          ruff check fp/search/main.py
+          ruff format fp/search/main.py
+          pytest -q tests/test_poke_engine_serialization.py::TestFindBestMoveSmoke::test_find_best_move_returns_a_legal_option_for_a_randombattle
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fp/search/main.py
+          git commit -m "Default risk mode for direct search calls"
+          git push origin HEAD:agent/upstream-sync-2026-08
