@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _ASSET_DIR = Path(__file__).resolve().parent.parent / "gui"
 _SERVER = None
 _THREAD = None
+_URL = None
 
 
 class _DashboardHandler(BaseHTTPRequestHandler):
@@ -56,20 +57,22 @@ class _DashboardHandler(BaseHTTPRequestHandler):
 
 
 def stop_dashboard() -> None:
-    global _SERVER, _THREAD
+    global _SERVER, _THREAD, _URL
     if _SERVER is not None:
         _SERVER.shutdown()
         _SERVER.server_close()
         _SERVER = None
         _THREAD = None
+        _URL = None
 
 
 def start_dashboard(host: str, port: int) -> str:
-    global _SERVER, _THREAD
+    global _SERVER, _THREAD, _URL
     if _SERVER is not None:
-        return "http://{}:{}".format(host, port)
+        return _URL
 
     _SERVER = ThreadingHTTPServer((host, port), _DashboardHandler)
+    actual_port = int(_SERVER.server_address[1])
     _THREAD = threading.Thread(
         target=_SERVER.serve_forever,
         name="foul-play-dashboard",
@@ -78,15 +81,15 @@ def start_dashboard(host: str, port: int) -> str:
     _THREAD.start()
     atexit.register(stop_dashboard)
 
-    url = "http://{}:{}".format(host, port)
-    publish_event("dashboard_started", url=url, overlay_url=url + "/overlay")
-    logger.info("Dashboard: %s", url)
-    logger.info("Overlay: %s/overlay", url)
+    _URL = "http://{}:{}".format(host, actual_port)
+    publish_event("dashboard_started", url=_URL, overlay_url=_URL + "/overlay")
+    logger.info("Dashboard: %s", _URL)
+    logger.info("Overlay: %s/overlay", _URL)
     if host not in {"127.0.0.1", "localhost", "::1"}:
         logger.warning(
             "Dashboard is listening on a non-loopback address. It has no authentication."
         )
-    return url
+    return _URL
 
 
 def maybe_start_dashboard() -> str | None:
