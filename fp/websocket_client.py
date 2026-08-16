@@ -1,12 +1,12 @@
 import asyncio
-import websockets
-import requests
 import json
+import logging
 import time
 
-import logging
+import requests
+import websockets
 
-from config import FoulPlayConfig
+from fp.config import FoulPlayConfig
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +38,9 @@ class PSWebsocketClient:
         self.username = username
         self.password = password
         self.address = address
+        self.rooms = set()
         self.reconnected = False
         self.reconnect_count = 0
-        self.rooms = set()
         self.login_uri = (
             "https://play.pokemonshowdown.com/api/login"
             if password
@@ -68,7 +68,18 @@ class PSWebsocketClient:
             except (websockets.ConnectionClosed, OSError) as exc:
                 await self._reconnect(exc)
 
+    @staticmethod
+    def _is_battle_choice(room, message_list):
+        if not room or not room.startswith("battle-") or not message_list:
+            return False
+        command = message_list[0].strip().lower()
+        return command.startswith(("/choose", "/switch", "/team"))
+
     async def send_message(self, room, message_list):
+        if FoulPlayConfig.suggest_only and self._is_battle_choice(room, message_list):
+            logger.info("Suggest-only: not sending %s", message_list[0])
+            return
+
         message = room + "|" + "|".join(message_list)
         logger.debug("Sending message to websocket: {}".format(message))
         while True:
@@ -85,11 +96,9 @@ class PSWebsocketClient:
         await self.send_message("", ["/avatar {}".format(avatar)])
         await self.send_message("", ["/cmd userdetails {}".format(self.username)])
         while True:
-            # Wait for the query response and check the avatar
-            # |queryresponse|QUERYTYPE|JSON
             msg = await self.receive_message()
             msg_split = msg.split("|")
-            if msg_split[1] == "queryresponse":
+            if len(msg_split) > 3 and msg_split[1] == "queryresponse":
                 user_details = json.loads(msg_split[3])
                 if user_details["avatar"] == avatar:
                     logger.info("Avatar set to {}".format(avatar))
@@ -102,19 +111,19 @@ class PSWebsocketClient:
                 break
 
     async def close(self):
-        await self.websocket.close()
+        if self.websocket is not None:
+            await self.websocket.close()
 
     async def get_id_and_challstr(self):
         while True:
             message = await self.receive_message()
             split_message = message.split("|")
-            if split_message[1] == "challstr":
+            if len(split_message) > 3 and split_message[1] == "challstr":
                 return split_message[2], split_message[3]
 
     async def login(self):
         logger.info("Logging in...")
         client_id, challstr = await self.get_id_and_challstr()
-
         guest_login = self.password is None
 
         if guest_login:
@@ -137,9 +146,7 @@ class PSWebsocketClient:
             )
 
         if response.status_code != 200:
-            logger.error(
-                "Could not get assertion\nDetails:\n{}".format(response.content)
-            )
+            logger.error("Could not get assertion\nDetails:\n{}".format(response.content))
             raise LoginError("Could not get assertion")
 
         if guest_login:
@@ -155,10 +162,7 @@ class PSWebsocketClient:
         logger.info("Successfully logged in")
         await self.send_message("", message)
         await asyncio.sleep(3)
-        if guest_login:
-            self.user_id = self.username
-        else:
-            self.user_id = response_json["curuser"]["userid"]
+        self.user_id = self.username if guest_login else response_json["curuser"]["userid"]
         return self.user_id
 
     async def _reconnect(self, exc):
@@ -184,7 +188,9 @@ class PSWebsocketClient:
                 await self.login()
                 if FoulPlayConfig.avatar is not None:
                     await self.avatar(FoulPlayConfig.avatar)
-                for room in list(self.rooms):
+                rooms = list(self.rooms)
+                self.rooms.clear()
+                for room in rooms:
                     await self.join_room(room)
                 self.reconnected = True
                 self.reconnect_count += 1
@@ -196,14 +202,14 @@ class PSWebsocketClient:
         logger.error("Max reconnect attempts reached")
         raise exc
 
-    async def update_team(self, team):
-        await self.send_message("", ["/utm {}".format(team)])
-
     def consume_reconnect_flag(self) -> bool:
         if self.reconnected:
             self.reconnected = False
             return True
         return False
+
+    async def update_team(self, team):
+        await self.send_message("", ["/utm {}".format(team)])
 
     async def challenge_user(self, user_to_challenge, battle_format):
         logger.info("Challenging {}...".format(user_to_challenge))
@@ -230,23 +236,18 @@ class PSWebsocketClient:
             ):
                 username = split_msg[2].strip()
 
-        message = ["/accept " + username]
-        await self.send_message("", message)
+        await self.send_message("", ["/accept " + username])
 
     async def search_for_match(self, battle_format):
         logger.info("Searching for ranked {} match".format(battle_format))
-        message = ["/search {}".format(battle_format)]
-        await self.send_message("", message)
+        await self.send_message("", ["/search {}".format(battle_format)])
 
     async def leave_battle(self, battle_tag):
-        message = ["/leave {}".format(battle_tag)]
-        await self.send_message("", message)
-
+        await self.send_message("", ["/leave {}".format(battle_tag)])
         while True:
             msg = await self.receive_message()
             if battle_tag in msg and "deinit" in msg:
                 return
 
     async def save_replay(self, battle_tag):
-        message = ["/savereplay"]
-        await self.send_message(battle_tag, message)
+        await self.send_message(battle_tag, ["/savereplay"])
