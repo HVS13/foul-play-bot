@@ -71,7 +71,9 @@ class PSWebsocketClient:
     @staticmethod
     def parse_room_rename(message):
         lines = message.split("\n")
-        source_room = lines[0][1:].strip() if lines and lines[0].startswith(">") else None
+        source_room = (
+            lines[0][1:].strip() if lines and lines[0].startswith(">") else None
+        )
         if not source_room:
             return None
         for line in lines[1:]:
