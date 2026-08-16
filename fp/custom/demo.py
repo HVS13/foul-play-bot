@@ -53,8 +53,7 @@ def _decision(
     return {
         "choice": choice,
         "policy": [
-            {"move": move, "weight": weight, "tags": []}
-            for move, weight in policy
+            {"move": move, "weight": weight, "tags": []} for move, weight in policy
         ],
         "confidence_ratio": confidence_ratio,
         "sampled_states": sampled_states,
@@ -159,7 +158,9 @@ def run_demo(interval: float = 2.0) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Offline Foul Play dashboard smoke demo")
+    parser = argparse.ArgumentParser(
+        description="Offline Foul Play dashboard smoke demo"
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--interval", type=float, default=2.0)
