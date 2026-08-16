@@ -33,6 +33,8 @@ def _percentile(values: list[float], percentile: float) -> float | None:
 
 
 def _decision_confidence(decision: dict) -> float | None:
+    if decision.get("confidence_ratio") is not None:
+        return float(decision["confidence_ratio"])
     policy = decision.get("policy_top") or []
     if len(policy) < 2:
         return None
@@ -49,8 +51,11 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
     decision_times = []
     confidence_ratios = []
     risk_modes = Counter()
+    decision_risk_modes = Counter()
     win_reasons = Counter()
     reconnects = 0
+    room_renames = 0
+    timer_pressure_decisions = 0
     total_decisions = 0
     wins = losses = ties = 0
 
@@ -59,6 +64,7 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
         if battle.get("duration_seconds") is not None:
             durations.append(float(battle["duration_seconds"]))
         reconnects += int(battle.get("reconnect_count", 0) or 0)
+        room_renames += int(battle.get("room_rename_count", 0) or 0)
         risk_modes[str(battle.get("risk_mode") or "unknown")] += 1
         win_reasons[str(battle.get("win_reason") or "unknown")] += 1
 
@@ -79,6 +85,12 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
             ratio = _decision_confidence(decision)
             if ratio is not None:
                 confidence_ratios.append(ratio)
+            configured_risk = decision.get("configured_risk_mode")
+            if configured_risk:
+                decision_risk_modes[str(configured_risk)] += 1
+            time_remaining = decision.get("time_remaining")
+            if time_remaining is not None and float(time_remaining) <= 30:
+                timer_pressure_decisions += 1
 
     low_confidence = sum(1 for ratio in confidence_ratios if ratio <= 1.15)
     report = {
@@ -115,7 +127,10 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
             ),
         },
         "reconnects": reconnects,
+        "room_renames": room_renames,
+        "timer_pressure_decisions": timer_pressure_decisions,
         "risk_modes": dict(risk_modes),
+        "decision_risk_modes": dict(decision_risk_modes),
         "win_reasons": dict(win_reasons),
     }
 
@@ -168,8 +183,19 @@ def format_text(report: dict) -> str:
             pct="n/a" if low_pct is None else "{}%".format(low_pct),
         )
     )
-    lines.append("Reconnects: {}".format(report["reconnects"]))
-    lines.append("Risk modes: {}".format(report["risk_modes"]))
+    lines.append(
+        "Reconnects: {} | room renames: {}".format(
+            report["reconnects"], report["room_renames"]
+        )
+    )
+    lines.append(
+        "Timer-pressure decisions (<=30s): {}".format(
+            report["timer_pressure_decisions"]
+        )
+    )
+    lines.append("Risk modes by battle: {}".format(report["risk_modes"]))
+    if report["decision_risk_modes"]:
+        lines.append("Risk modes by decision: {}".format(report["decision_risk_modes"]))
     lines.append("Win reasons: {}".format(report["win_reasons"]))
     if report["avg_turns"] is not None:
         lines.append("Average turns: {}".format(report["avg_turns"]))

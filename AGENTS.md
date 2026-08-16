@@ -5,6 +5,22 @@ Foul Play is a Pokémon Showdown battle bot driven by poke-engine search. This r
 
 The 80/20 rule for this repo: prefer a small, reliable feature that improves battle operation or decision visibility over a broad framework or speculative abstraction.
 
+## Shared direction with upstream
+Treat upstream as the source of truth for competitive battle intelligence: generation mechanics, format support, hidden-state/set inference, battle modes, sampling, and poke-engine search. The local project should complement that work rather than fork it into a competing engine.
+
+Local differentiation should concentrate on three areas:
+1. **Operational reliability** around Pokémon Showdown transport and battle-session recovery.
+2. **Observability** that makes upstream search, uncertainty, latency, and outcomes measurable.
+3. **Optional interfaces** such as the dashboard/overlay that consume the same engine state without owning battle logic.
+
+When choosing work, prefer in order:
+- correctness/protocol bugs that can invalidate otherwise-good engine decisions;
+- measurement needed to evaluate real battle performance;
+- small usability improvements that do not distort battle logic;
+- decision heuristics only after telemetry shows a specific recurring weakness.
+
+Do not replace or broadly rewrite upstream search/sampling architecture merely to make local customization easier. If a local idea is generally useful to Foul Play, keep its implementation small enough that it could plausibly be upstreamed or removed when upstream gains an equivalent feature.
+
 ## Architecture
 - Entry point: `run.py`.
 - CLI/configuration: `fp/config.py`.
@@ -31,6 +47,7 @@ The 80/20 rule for this repo: prefer a small, reliable feature that improves bat
 - The default GUI host is loopback-only (`127.0.0.1`). Treat non-loopback binding as explicitly unsafe unless authentication is added later.
 - Explicit resume and reconnect recovery share one `attach_to_battle()` state-rebuild path.
 - Never automatically resend a battle choice after a websocket reconnect. Rebuild current state and calculate against the latest request instead.
+- Pokémon Showdown room renames are transport aliases. Resolve commands to the canonical room and update the active session tag without moving room-routing logic into the battle engine.
 - Preserve upstream public search helpers (`find_best_move`, `find_best_move_with_policy`) for compatibility; new local consumers use `find_best_move_result`.
 
 ## Current MVP
