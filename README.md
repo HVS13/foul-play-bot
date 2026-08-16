@@ -2,7 +2,7 @@
 
 A Pokémon Showdown battle bot powered by [poke-engine](https://github.com/pmariglia/poke-engine).
 
-This repository tracks [`pmariglia/foul-play`](https://github.com/pmariglia/foul-play) and keeps a small set of local features on top. The local changes are intentionally isolated so upstream updates are easier to merge.
+This repository tracks [`pmariglia/foul-play`](https://github.com/pmariglia/foul-play) and keeps a deliberately small local layer for recovery, search/risk behavior, telemetry, and a live dashboard/overlay.
 
 ![CI](https://github.com/HVS13/foul-play-bot/actions/workflows/ci.yml/badge.svg)
 
@@ -10,8 +10,6 @@ This repository tracks [`pmariglia/foul-play`](https://github.com/pmariglia/foul
 
 - Python 3.11+
 - Rust when `poke-engine` must be built locally
-
-Install dependencies:
 
 ```bash
 pip install -r requirements.txt
@@ -23,13 +21,45 @@ For development:
 pip install -r requirements-dev.txt
 ```
 
+## Quick start
+
+Search the ladder:
+
+```bash
+python run.py \
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode search_ladder \
+  --pokemon-format gen9randombattle
+```
+
+Add `--gui` to start the local dashboard:
+
+```bash
+python run.py \
+  --websocket-uri ps \
+  --ps-username 'My Username' \
+  --ps-password sekret \
+  --bot-mode search_ladder \
+  --pokemon-format gen9randombattle \
+  --gui
+```
+
+Open:
+
+- Dashboard: `http://127.0.0.1:8765/`
+- Browser/OBS overlay: `http://127.0.0.1:8765/overlay`
+
+The GUI is read-only and uses only the Python standard library. It is intentionally bound to `127.0.0.1` by default. There is no authentication, so do not expose it to a network unless you understand that tradeoff.
+
 ## Configuration
 
 Run `python run.py --help` for the authoritative option list.
 
 Required unless supplied by `--config`:
 
-- `--websocket-uri`, such as `ps`, `pokemonshowdown`, `local`, or a full websocket URI
+- `--websocket-uri`: `ps`, `pokemonshowdown`, `local`, or a full websocket URI
 - `--ps-username`
 - `--bot-mode`: `challenge_user`, `accept_challenge`, `search_ladder`, or `resume_battle`
 - `--pokemon-format`, for example `gen9randombattle`
@@ -38,37 +68,37 @@ Required unless supplied by `--config`:
 
 Important optional settings:
 
-- `--config PATH`: TOML or JSON configuration file; explicit CLI arguments override file values
-- `--ps-avatar`
-- `--user-to-challenge`
-- `--smogon-stats-format`
+- `--config PATH`: TOML or JSON; explicit CLI arguments override file values
 - `--search-time-ms` (default `100`)
 - `--search-parallelism` (default `1`)
+- `--search-threads` (default `1`)
 - `--team-preview-search-time-ms`
 - `--team-preview-search-parallelism`
-- `--search-threads` (default `1`)
 - `--auto-parallelism` / `--no-auto-parallelism`
 - `--parallelism-cap` (default `8`)
-- `--run-count` (default `1`)
-- `--team-name`
-- `--team-list`
-- `--save-replay`: `always`, `never`, `on_loss`, or `on_win`
+- `--risk-mode`: `auto`, `safe`, `balanced`, or `aggressive`
 - `--battle-timer`: `on`, `off`, or `none`
 - `--suggest-only` / `--no-suggest-only`
-- `--room-name`
-- `--battle-tag` or `--battle-url` for `resume_battle`
-- `--risk-mode`: `auto`, `safe`, `balanced`, or `aggressive`
+- `--save-replay`: `always`, `never`, `on_loss`, or `on_win`
 - `--summary-path`
 - `--summary-json-path`
 - `--reconnect-retries` (default `5`)
 - `--reconnect-backoff-seconds` (default `1.0`)
 - `--reconnect-max-backoff-seconds` (default `30.0`)
+- `--gui` / `--no-gui`
+- `--gui-host` (default `127.0.0.1`)
+- `--gui-port` (default `8765`)
+- `--run-count` (default `1`)
+- `--team-name`
+- `--team-list`
+- `--room-name`
+- `--battle-tag` or `--battle-url` for `resume_battle`
 - `--log-level`
 - `--log-to-file` / `--no-log-to-file`
 
-### Config files
+Unknown keys in config files are rejected instead of being silently ignored.
 
-Example `config.toml`:
+### Config file example
 
 ```toml
 websocket_uri = "ps"
@@ -80,6 +110,12 @@ pokemon_format = "gen9randombattle"
 risk_mode = "auto"
 auto_parallelism = true
 parallelism_cap = 6
+search_threads = 2
+
+gui = true
+gui_host = "127.0.0.1"
+gui_port = 8765
+
 summary_path = "logs/battle_summary.txt"
 summary_json_path = "logs/battle_summary.jsonl"
 ```
@@ -90,9 +126,24 @@ CLI values take precedence:
 python run.py --config config.toml --risk-mode aggressive
 ```
 
-## Local features in this repo
+## Dashboard and overlay
 
-### Resume an active battle
+The dashboard receives the same internal events used by telemetry. It does not own battle or search logic.
+
+It shows:
+
+- current battle, turn, timer, and active Pokémon HP
+- top move recommendations and policy weights
+- resolved risk mode and policy confidence
+- search wall time and sampled-state count
+- opponent switch/Protect observations
+- connection/reconnect and battle lifecycle events
+
+The `/overlay` view is intentionally compact and transparent so it can be used as a small browser window or an OBS Browser Source.
+
+## Local battle features
+
+### Attach/resume and reconnect recovery
 
 Use the same Pokémon Showdown account that is already in the battle:
 
@@ -118,45 +169,54 @@ python run.py \
   --battle-url https://play.pokemonshowdown.com/battle-gen9ou-123456
 ```
 
-The current battle tag is persisted to `logs/last_battle_tag.txt`. If the websocket disconnects, the client reconnects, rejoins the battle, and attempts to rebuild state automatically.
+Manual resume and automatic reconnect now use the same `attach_to_battle()` reconstruction path. The latest available request/rqid is used before choosing a move. If a battle choice fails because the websocket disconnected, it is not blindly resent after reconnect; state is rebuilt first.
+
+The current battle tag is persisted to `logs/last_battle_tag.txt`.
 
 ### Risk modes
-
-`--risk-mode balanced` stays close to upstream move selection. Other modes change how the final MCTS policy is sampled:
 
 - `safe`: favors the highest-weight move
 - `balanced`: normal near-best exploration
 - `aggressive`: considers a wider near-best set
-- `auto`: switches among those behaviors based on remaining Pokémon and HP position
+- `auto`: changes behavior based on remaining Pokémon and HP position
 
 ### Suggest-only mode
 
-Add `--suggest-only` to calculate and log decisions without sending `/choose`, `/switch`, or `/team` commands. Suggestions include short tags such as `attack`, `ko`, `setup`, `pivot`, and `heal` when available.
+Add `--suggest-only` to calculate, log, and display decisions without sending `/choose`, `/switch`, or `/team` commands.
 
 ### Search and telemetry
 
 The local search layer adds:
 
-- CPU-based auto parallelism with a configurable cap
+- CPU-based auto parallelism with a configurable cap and awareness of `search_threads`
 - dynamic search effort based on turn, HP, remaining Pokémon, timer pressure, and branching factor
-- an extra search pass when the leading policy choices are unusually close
+- an extra search pass when leading policy choices are unusually close
 - persistent MCTS process-pool reuse with recovery after `BrokenProcessPool`
-- light opponent switch/protect tendency tracking and policy bias
+- light opponent switch/Protect tendency tracking
+- normalized policy weights and a shared `SearchResult` model used by telemetry and the GUI
 
-Battle summaries can be appended as text with `--summary-path` and as JSONL with `--summary-json-path`. JSON summaries include decision logs, search timing, result information, reconnect count, replay metadata, and opponent tendency counters.
+Battle summaries can be appended as text with `--summary-path` and as JSONL with `--summary-json-path`. JSON summaries include a schema version, decision logs, search timing, result information, reconnect count, replay metadata, and opponent tendency counters.
 
-## Common runs
+## Local customization layout
 
-Search the ladder:
+Local-only logic is isolated under `fp/custom/`:
 
-```bash
-python run.py \
-  --websocket-uri ps \
-  --ps-username 'My Username' \
-  --ps-password sekret \
-  --bot-mode search_ladder \
-  --pokemon-format gen9randombattle
+```text
+fp/custom/
+  decisions.py       # decision tags + SearchResult
+  events.py          # interface/event state
+  opponent_model.py  # observed opponent behavior
+  telemetry.py       # summaries + decision logging
+  dashboard.py       # local HTTP server
+
+fp/gui/
+  dashboard.html
+  overlay.html
 ```
+
+Upstream-facing files should contain small hooks rather than copies of custom business logic. This is intentional so future upstream merges stay manageable.
+
+## Other common runs
 
 Accept challenges:
 
@@ -184,27 +244,14 @@ python run.py \
 
 ## Docker
 
-Build with the Makefile:
-
 ```bash
 make docker
 ```
 
-Or for a specific generation:
+For a specific generation:
 
 ```bash
 make docker GEN=gen4
-```
-
-Example:
-
-```bash
-docker run --rm --network host foul-play:latest \
-  --websocket-uri ps \
-  --ps-username 'My Username' \
-  --ps-password sekret \
-  --bot-mode search_ladder \
-  --pokemon-format gen9randombattle
 ```
 
 ## Engine
@@ -238,7 +285,7 @@ git remote add upstream https://github.com/pmariglia/foul-play.git
 git fetch upstream
 ```
 
-For each upstream update, use a sync branch:
+For each update:
 
 ```bash
 git checkout main
@@ -248,18 +295,15 @@ git fetch upstream
 git merge upstream/main
 ```
 
-Resolve conflicts by keeping the current upstream architecture, then reapply only the local hook behavior. Most local-only logic now lives in `fp/custom_features.py`; configuration is in `fp/config.py`; policy behavior is in `fp/search/main.py`; resume/reconnect orchestration is in `fp/run_battle.py`.
+Resolve structural conflicts in favor of current upstream architecture, then reapply only the smallest hooks needed for `fp/custom/`, configuration, attach/reconnect, and policy behavior.
 
 Validate before merging:
 
 ```bash
+python -m compileall -q fp
 ruff check
 ruff format --check --diff
 pytest tests
 ```
 
-Then push the sync branch, open a PR into `main`, wait for CI, and merge it:
-
-```bash
-git push -u origin sync/upstream-YYYY-MM
-```
+Then push the sync branch, open a PR into `main`, wait for CI, and merge it.
