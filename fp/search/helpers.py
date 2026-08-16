@@ -1,15 +1,19 @@
 import logging
 
-import constants
-from data.pkmn_sets import PredictedPokemonSet
-from fp.battle import Pokemon
+from fp import constants
+from fp.data.sets import PredictedPokemonSet
+from fp.battle.state import Pokemon
 
 logger = logging.getLogger(__name__)
 
 
 def log_pkmn_set(pkmn: Pokemon, source=None):
     nature_evs = f"{pkmn.nature},{','.join(str(x) for x in pkmn.evs)}"
-    if nature_evs in ["serious,85,85,85,85,85,85", "serious,252,252,252,252,252,252"]:
+    if nature_evs in [
+        "serious,85,85,85,85,85,85",
+        "serious,252,252,252,252,252,252",
+        "serious,11,11,11,11,11,11",
+    ]:
         s = "\t{} {} {} {}".format(
             pkmn.name.rjust(15),
             str(pkmn.ability).rjust(12),

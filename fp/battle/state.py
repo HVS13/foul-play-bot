@@ -1,15 +1,25 @@
 from collections import defaultdict
 from collections import namedtuple
 
-import constants
+from fp import constants
 import logging
 
-from data import all_move_json
-from data import pokedex
+from fp.data import all_move_json
+from fp.data import pokedex
 
-from fp.helpers import get_pokemon_info_from_condition, possible_hidden_power_types
-from fp.helpers import normalize_name
-from fp.helpers import calculate_stats
+from fp.battle.helpers import (
+    get_pokemon_info_from_condition,
+    possible_hidden_power_types,
+    random_battles_evs,
+)
+from fp.battle.helpers import normalize_name
+from fp.battle.helpers import calculate_stats
+from fp.format_spec import FormatSpec
+from fp.generations import (
+    GenerationMechanics,
+    current_generation_mechanics,
+    generation_mechanics,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -62,7 +72,6 @@ class Battle:
         self.battle_tag = battle_tag
         self.user = Battler()
         self.opponent = Battler()
-        self.started_at = None
         self.weather = None
         self.weather_turns_remaining = -1
         self.weather_source = ""
@@ -82,12 +91,15 @@ class Battle:
         self.wait = False
 
         self.battle_type = None
-        self.pokemon_format = None
+        self.mode = None
+        self.pokemon_format = ""
         self.generation = None
         self.time_remaining = None
 
         self.request_json = None
         self.msg_list = []
+        self.opponent_team_preview_affinities = None
+        self.started_at = None
         self.search_times_ms = []
         self.decision_log = []
         self.decision_count = 0
@@ -100,6 +112,14 @@ class Battle:
             "switches": 0,
             "protects": 0,
         }
+
+    @property
+    def format_spec(self) -> FormatSpec:
+        return FormatSpec.from_format_string(self.pokemon_format)
+
+    @property
+    def gen(self) -> GenerationMechanics:
+        return generation_mechanics(self.generation)
 
     def initialize_team_preview(self, opponent_pokemon, battle_type):
         self.user.reserve.insert(0, self.user.active)
@@ -137,19 +157,25 @@ class Battle:
         self.rqid = user_json[constants.RQID]
 
     def mega_evolve_possible(self):
-        return (
-            any(g in self.generation for g in constants.MEGA_EVOLVE_GENERATIONS)
-            or "nationaldex" in self.pokemon_format
-        )
+        return self.gen.megas_exist or self.format_spec.national_dex
 
     def get_effective_speed(self, battler):
         boosted_speed = battler.active.calculate_boosted_stats()[constants.SPEED]
 
-        if self.weather == constants.SUN and battler.active.ability == "chlorophyll":
+        if (
+            self.weather == constants.Weather.SUN
+            and battler.active.ability == "chlorophyll"
+        ):
             boosted_speed *= 2
-        elif self.weather == constants.RAIN and battler.active.ability == "swiftswim":
+        elif (
+            self.weather == constants.Weather.RAIN
+            and battler.active.ability == "swiftswim"
+        ):
             boosted_speed *= 2
-        elif self.weather == constants.SAND and battler.active.ability == "sandrush":
+        elif (
+            self.weather == constants.Weather.SAND
+            and battler.active.ability == "sandrush"
+        ):
             boosted_speed *= 2
         elif (
             self.weather in constants.HAIL_OR_SNOW
@@ -158,7 +184,7 @@ class Battle:
             boosted_speed *= 2
 
         if (
-            self.field == constants.ELECTRIC_TERRAIN
+            self.field == constants.Terrain.ELECTRIC
             and battler.active.ability == "surgesurfer"
         ):
             boosted_speed *= 2
@@ -177,7 +203,7 @@ class Battle:
             boosted_speed *= 1.5
 
         if (
-            constants.PARALYZED == battler.active.status
+            constants.Status.PARALYZED == battler.active.status
             and battler.active.ability != "quickfeet"
         ):
             boosted_speed *= 0.5
@@ -215,9 +241,14 @@ class Battler:
         self.last_selected_move = LastUsedMove("", "", 0)
         self.last_used_move = LastUsedMove("", "", 0)
 
-    def possible_mega_evolutions(self):
+    def num_revealed_pkmn(self) -> int:
+        return len([p for p in [self.active] + self.reserve if p.revealed])
+
+    def possible_mega_evolutions(self, must_be_revealed=False):
         result = {}
         for pkmn in self.reserve + [self.active]:
+            if must_be_revealed and not pkmn.revealed:
+                continue
             megas_possible = pkmn.get_mega_pkmn_info()
             for m in megas_possible:
                 if pkmn.hp and (
@@ -245,7 +276,7 @@ class Battler:
                 return reserve_pkmn
             if pkmn_name in [
                 normalize_name(n)
-                for n in pokedex[reserve_pkmn.name].get("otherFormes", [])
+                for n in pokedex.get(reserve_pkmn.name, {}).get("otherFormes", [])
             ]:
                 return reserve_pkmn
         return None
@@ -273,7 +304,10 @@ class Battler:
     def lock_active_pkmn_status_moves_if_active_has_assaultvest(self):
         if self.active.item == "assaultvest":
             for m in self.active.moves:
-                if all_move_json[m.name][constants.CATEGORY] == constants.STATUS:
+                if (
+                    all_move_json[m.name][constants.CATEGORY]
+                    == constants.MoveCategory.STATUS
+                ):
                     m.disabled = True
 
     def choice_lock_moves(self):
@@ -298,7 +332,10 @@ class Battler:
     def taunt_lock_moves(self):
         if constants.TAUNT in self.active.volatile_statuses:
             for m in self.active.moves:
-                if all_move_json[m.name][constants.CATEGORY] == constants.STATUS:
+                if (
+                    all_move_json[m.name][constants.CATEGORY]
+                    == constants.MoveCategory.STATUS
+                ):
                     m.disabled = True
 
     def locked_move_lock(self):
@@ -409,7 +446,9 @@ class Battler:
             pkmn.hp, pkmn.max_hp, pkmn.status = get_pokemon_info_from_condition(
                 pkmn_dict[constants.CONDITION]
             )
-            pkmn.ability = pkmn_dict[constants.REQUEST_DICT_ABILITY]
+            pkmn.ability = pkmn_dict[
+                current_generation_mechanics().request_dict_ability
+            ]
             pkmn.item = pkmn_dict[constants.ITEM] if pkmn_dict[constants.ITEM] else None
             for stat, number in pkmn_dict[constants.STATS].items():
                 pkmn.stats[constants.STAT_ABBREVIATION_LOOKUPS[stat]] = number
@@ -476,7 +515,9 @@ class Battler:
                 pkmn = Pokemon("zaciancrowned", pkmn.level)
                 pkmn.nickname = nickname
 
-            pkmn.ability = pkmn_dict[constants.REQUEST_DICT_ABILITY]
+            pkmn.ability = pkmn_dict[
+                current_generation_mechanics().request_dict_ability
+            ]
             pkmn.index = index + 1
             pkmn.reviving = pkmn_dict.get(constants.REVIVING, False)
             pkmn.hp, pkmn.max_hp, pkmn.status = get_pokemon_info_from_condition(
@@ -556,10 +597,15 @@ class Battler:
 
 
 class Pokemon:
-    def __init__(self, name: str, level: int, nature="serious", evs=(85,) * 6):
+    def __init__(self, name: str, level: int, nature="serious", evs=None):
+        if evs is None:
+            evs = random_battles_evs()
+
         self.name = normalize_name(name)
         self.nickname = None
         self.base_name = self.name
+        self.index = None
+        self.revealed = False
         self.level = level
         self.nature = nature
         self.evs = evs
@@ -626,11 +672,11 @@ class Pokemon:
         return normalize_name(pokedex_data.get("baseSpecies", self.name))
 
     def get_mega_pkmn_info(self) -> list[tuple[str, str]]:
-        # For avoiding Legends ZA megas: omit mega pokemon in the pokedex that have "gen": 9
-        # Come back and undo this when Legends ZA megas are available in standard formats
         mega_names = []
         if self.name == "rayquaza":
             return [("rayquaza", "none")]
+        elif self.name == "floetteeternal":
+            return [("floettemega", "floettite")]
 
         potential_megas = [
             f"{self.name}mega",
@@ -638,7 +684,7 @@ class Pokemon:
             f"{self.name}megay",
         ]
         for mega_forme in potential_megas:
-            if mega_forme in pokedex and pokedex[mega_forme].get("gen") != 9:
+            if mega_forme in pokedex:
                 mega_names.append(
                     (
                         mega_forme,
@@ -768,14 +814,20 @@ class Move:
         if (
             constants.HIDDEN_POWER != name
             and constants.HIDDEN_POWER in name
-            and not name.endswith(constants.HIDDEN_POWER_ACTIVE_MOVE_BASE_DAMAGE_STRING)
+            and not name.endswith(
+                current_generation_mechanics().hidden_power_base_damage_string
+            )
         ):
             name = "{}{}".format(
-                name, constants.HIDDEN_POWER_ACTIVE_MOVE_BASE_DAMAGE_STRING
+                name, current_generation_mechanics().hidden_power_base_damage_string
             )
         move_json = all_move_json[name]
         self.name = name
-        self.max_pp = int(move_json.get(constants.PP) * 1.6)
+
+        if move_json[constants.PP] == 1:
+            self.max_pp = 1
+        else:
+            self.max_pp = current_generation_mechanics().max_pp(move_json[constants.PP])
 
         self.disabled = False
         self.can_z = False

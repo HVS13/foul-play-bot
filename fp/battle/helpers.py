@@ -1,6 +1,6 @@
 import math
-import constants
-from config import FoulPlayConfig
+from fp import constants
+from fp.generations import StatCalculation, current_generation_mechanics
 
 natures = {
     "lonely": {"plus": constants.ATTACK, "minus": constants.DEFENSE},
@@ -31,7 +31,28 @@ natures = {
 }
 
 
+def random_battles_evs() -> tuple[int, int, int, int, int, int]:
+    return current_generation_mechanics().randombattle_evs
+
+
+def maximum_ev() -> int:
+    return current_generation_mechanics().max_ev
+
+
+def champions_stat_point_to_effective_ev(stat_point: int) -> int:
+    if stat_point == 0:
+        return 0
+    else:
+        return 8 * stat_point - 4
+
+
 def get_pokemon_info_from_condition(condition_string: str):
+    def remove_maxhp_chars(val: str):
+        chars = {"g", "y", "r"}
+        while val and val[-1] in chars:
+            val = val[:-1]
+        return val
+
     if constants.FNT in condition_string:
         return 0, 0, None
 
@@ -39,10 +60,10 @@ def get_pokemon_info_from_condition(condition_string: str):
     hp = int(split_string[0])
     if any(s in condition_string for s in constants.NON_VOLATILE_STATUSES):
         maxhp, status = split_string[1].split(" ")
-        maxhp = int(maxhp)
+        maxhp = int(remove_maxhp_chars(maxhp))
         return hp, maxhp, status
     else:
-        maxhp = int(split_string[1])
+        maxhp = int(remove_maxhp_chars(split_string[1]))
         return hp, maxhp, None
 
 
@@ -113,7 +134,7 @@ def _calculate_stats_gen_1_2(base_stats, level):
     return new_stats
 
 
-def _calculate_stats(base_stats, level, ivs=(31,) * 6, evs=(85,) * 6, nature="serious"):
+def _calculate_stats(base_stats, level, ivs, evs, nature):
     new_stats = dict()
 
     new_stats[constants.HITPOINTS] = (
@@ -154,8 +175,12 @@ def _calculate_stats(base_stats, level, ivs=(31,) * 6, evs=(85,) * 6, nature="se
 
 
 def calculate_stats(base_stats, level, ivs=(31,) * 6, evs=(85,) * 6, nature="serious"):
-    if any(g in FoulPlayConfig.pokemon_format for g in ["gen1", "gen2"]):
+    stat_calculation = current_generation_mechanics().stat_calculation
+    if stat_calculation is StatCalculation.GEN_1_2:
         return _calculate_stats_gen_1_2(base_stats, level)
+    elif stat_calculation is StatCalculation.CHAMPIONS:
+        evs = [champions_stat_point_to_effective_ev(ev) for ev in evs]
+        return _calculate_stats(base_stats, level, ivs, evs, nature)
     else:
         return _calculate_stats(base_stats, level, ivs, evs, nature)
 
