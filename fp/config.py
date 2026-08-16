@@ -102,6 +102,9 @@ class _FoulPlayConfig:
     reconnect_retries: int
     reconnect_backoff_seconds: float
     reconnect_max_backoff_seconds: float
+    gui: bool
+    gui_host: str
+    gui_port: int
     log_level: str
     log_to_file: bool
     stdout_log_handler: logging.StreamHandler
@@ -184,7 +187,7 @@ class _FoulPlayConfig:
             "--auto-parallelism",
             action=argparse.BooleanOptionalAction,
             default=False,
-            help="Set search parallelism from available CPUs",
+            help="Set process parallelism from available CPUs and search threads",
         )
         parser.add_argument("--parallelism-cap", type=int, default=8)
         parser.add_argument("--run-count", type=int, default=1)
@@ -222,6 +225,14 @@ class _FoulPlayConfig:
         parser.add_argument("--reconnect-retries", type=int, default=5)
         parser.add_argument("--reconnect-backoff-seconds", type=float, default=1.0)
         parser.add_argument("--reconnect-max-backoff-seconds", type=float, default=30.0)
+        parser.add_argument(
+            "--gui",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Run the local read-only dashboard and browser/OBS overlay",
+        )
+        parser.add_argument("--gui-host", default="127.0.0.1")
+        parser.add_argument("--gui-port", type=int, default=8765)
         parser.add_argument("--log-level", default="DEBUG")
         parser.add_argument(
             "--log-to-file",
@@ -230,9 +241,12 @@ class _FoulPlayConfig:
         )
 
         allowed_defaults = {action.dest for action in parser._actions}
-        parser.set_defaults(
-            **{k: v for k, v in config_defaults.items() if k in allowed_defaults}
-        )
+        unknown_defaults = sorted(set(config_defaults) - allowed_defaults)
+        if unknown_defaults:
+            raise ValueError(
+                "Unknown config option(s): {}".format(", ".join(unknown_defaults))
+            )
+        parser.set_defaults(**config_defaults)
         args = parser.parse_args()
 
         self.websocket_uri = self.get_websocket(args.websocket_uri)
@@ -242,18 +256,19 @@ class _FoulPlayConfig:
         self.bot_mode = BotModes[args.bot_mode] if args.bot_mode else None
         self.pokemon_format = args.pokemon_format
         self.smogon_stats = args.smogon_stats_format
-        self.search_time_ms = args.search_time_ms
-        self.parallelism = args.search_parallelism
+        self.search_time_ms = max(25, args.search_time_ms)
+        self.search_threads = max(1, args.search_threads)
+        self.parallelism = max(1, args.search_parallelism)
         if args.auto_parallelism:
-            self.parallelism = self._auto_parallelism(args.parallelism_cap)
-        self.parallelism = max(1, self.parallelism)
+            self.parallelism = self._auto_parallelism(
+                args.parallelism_cap, self.search_threads
+            )
         self.team_preview_search_time_ms = (
             args.team_preview_search_time_ms or self.search_time_ms
         )
         self.team_preview_search_parallelism = (
             args.team_preview_search_parallelism or self.parallelism
         )
-        self.search_threads = max(1, args.search_threads)
         self.run_count = args.run_count
         self.team_name = args.team_name or self.pokemon_format
         self.team_list = args.team_list
@@ -277,6 +292,9 @@ class _FoulPlayConfig:
         self.reconnect_max_backoff_seconds = max(
             self.reconnect_backoff_seconds, args.reconnect_max_backoff_seconds
         )
+        self.gui = args.gui
+        self.gui_host = args.gui_host
+        self.gui_port = args.gui_port
         self.log_level = args.log_level
         self.log_to_file = args.log_to_file
         self.validate_config()
@@ -298,11 +316,11 @@ class _FoulPlayConfig:
         return cleaned.split("/")[-1]
 
     @staticmethod
-    def _auto_parallelism(parallelism_cap: int) -> int:
+    def _auto_parallelism(parallelism_cap: int, search_threads: int = 1) -> int:
         cpu_count = os.cpu_count() or 1
-        if cpu_count <= 1:
-            return 1
-        return max(1, min(cpu_count - 1, max(1, parallelism_cap)))
+        usable_cpus = max(1, cpu_count - 1)
+        workers_by_threads = max(1, usable_cpus // max(1, search_threads))
+        return max(1, min(workers_by_threads, max(1, parallelism_cap)))
 
     @property
     def format_spec(self) -> FormatSpec:
@@ -317,6 +335,8 @@ class _FoulPlayConfig:
             raise AssertionError("BOT_MODE is required")
         if not self.pokemon_format:
             raise AssertionError("POKEMON_FORMAT is required")
+        if not 1 <= self.gui_port <= 65535:
+            raise AssertionError("GUI_PORT must be between 1 and 65535")
         if self.bot_mode == BotModes.challenge_user:
             assert (
                 self.user_to_challenge is not None

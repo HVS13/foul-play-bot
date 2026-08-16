@@ -8,13 +8,14 @@ from fp.battle.protocol import async_update_battle, process_battle_updates
 from fp.battle.state import Battle
 from fp.config import FoulPlayConfig
 from fp.constants import BattleType
-from fp.custom_features import (
+from fp.custom.events import publish_event
+from fp.custom.opponent_model import update_opponent_tendencies
+from fp.custom.telemetry import (
     battle_is_finished,
     clear_last_battle_tag,
     extract_win_reason,
     extract_winner,
     should_save_replay,
-    update_opponent_tendencies,
     write_battle_summary,
     write_last_battle_tag,
 )
@@ -39,6 +40,7 @@ async def start_battle(ps_websocket_client, pokemon_battle_type, team_dict):
     )
     battle.started_at = battle.started_at or time.time()
     write_last_battle_tag(battle.battle_tag)
+    publish_event("battle_started", battle)
 
     await ps_websocket_client.send_message(battle.battle_tag, ["hf"])
     if FoulPlayConfig.battle_timer != "none":
@@ -66,6 +68,12 @@ async def _finish_battle(ps_websocket_client, battle, msg):
         )
 
     write_battle_summary(battle, winner, ps_websocket_client.reconnect_count)
+    publish_event(
+        "battle_finished",
+        battle,
+        winner=winner,
+        win_reason=battle.win_reason,
+    )
     clear_last_battle_tag()
     await ps_websocket_client.leave_battle(battle.battle_tag)
     return winner
@@ -89,12 +97,23 @@ async def run_battle_loop(ps_websocket_client, battle):
             return RECONNECT_RESUME
 
         action_required = await async_update_battle(battle, msg)
+        publish_event("battle_updated", battle)
         if action_required and not battle.wait:
             best_move = await async_pick_move(battle)
             await ps_websocket_client.send_message(battle.battle_tag, best_move)
 
 
+def _request_id(request_json):
+    if request_json is None:
+        return -1
+    try:
+        return int(request_json.get(constants.RQID, -1))
+    except (TypeError, ValueError):
+        return -1
+
+
 def _extract_request_json(msg_lines):
+    latest = None
     for line in msg_lines:
         split_line = line.split("|")
         if (
@@ -102,8 +121,10 @@ def _extract_request_json(msg_lines):
             and split_line[1].strip() == "request"
             and split_line[2].strip()
         ):
-            return json.loads(split_line[2].strip("'"))
-    return None
+            candidate = json.loads(split_line[2].strip("'"))
+            if latest is None or _request_id(candidate) >= _request_id(latest):
+                latest = candidate
+    return latest
 
 
 def _collect_player_map(msg_lines, player_map):
@@ -157,9 +178,29 @@ def _initialize_resume_datasets(battle, known_names, backlog_text):
             logger.warning("Could not fully initialize resume datasets: %s", exc)
 
 
-async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_tag):
+def _carry_session_metadata(battle, previous_battle):
+    if previous_battle is None:
+        battle.started_at = time.time()
+        return
+
+    battle.started_at = previous_battle.started_at or time.time()
+    battle.search_times_ms = list(previous_battle.search_times_ms)
+    battle.decision_log = list(previous_battle.decision_log)
+    battle.decision_count = previous_battle.decision_count
+    battle.win_reason = previous_battle.win_reason
+    battle.replay_url = previous_battle.replay_url
+    battle.replay_saved = previous_battle.replay_saved
+    battle.opponent_tendencies = dict(previous_battle.opponent_tendencies)
+
+
+async def attach_to_battle(
+    ps_websocket_client,
+    pokemon_battle_type,
+    battle_tag,
+    previous_battle=None,
+):
     if not battle_tag:
-        raise ValueError("battle_tag is required to resume a battle")
+        raise ValueError("battle_tag is required to attach to a battle")
 
     write_last_battle_tag(battle_tag)
     await ps_websocket_client.join_room(battle_tag)
@@ -185,7 +226,12 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
         backlog_msgs.append(msg)
         _collect_player_map(msg_lines, player_map)
         _collect_known_pokemon(msg_lines, known_names)
-        request_json = request_json or _extract_request_json(msg_lines)
+        candidate_request = _extract_request_json(msg_lines)
+        if candidate_request is not None and (
+            request_json is None
+            or _request_id(candidate_request) >= _request_id(request_json)
+        ):
+            request_json = candidate_request
         if request_json is not None and len(player_map) >= 2:
             break
 
@@ -196,7 +242,7 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
 
     format_spec = FormatSpec.from_format_string(pokemon_battle_type)
     battle = Battle(battle_tag)
-    battle.started_at = time.time()
+    _carry_session_metadata(battle, previous_battle)
     battle.pokemon_format = pokemon_battle_type
     battle.generation = format_spec.generation
     battle.battle_type = format_spec.battle_type
@@ -221,9 +267,6 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
     battle.rqid = request_json.get(constants.RQID)
     _initialize_resume_datasets(battle, known_names, "\n".join(backlog_msgs))
 
-    # Rebuild field/opponent history, then refresh the user's current state from
-    # the latest request JSON. This keeps resume compatible with the upstream
-    # protocol parser while avoiding stale user HP/move data.
     history_lines = []
     for backlog in backlog_msgs:
         for line in backlog.split("\n"):
@@ -233,7 +276,7 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
     try:
         process_battle_updates(battle)
     except Exception as exc:
-        logger.warning("Partial history replay while resuming battle: %s", exc)
+        logger.warning("Partial history replay while attaching to battle: %s", exc)
         battle.msg_list.clear()
     try:
         battle.user.update_from_request_json(request_json)
@@ -244,6 +287,17 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
     battle.rqid = request_json.get(constants.RQID)
     battle.force_switch = bool(request_json.get(constants.FORCE_SWITCH))
     battle.wait = bool(request_json.get(constants.WAIT))
+
+    if previous_battle is None:
+        for backlog in backlog_msgs:
+            update_opponent_tendencies(battle, backlog)
+
+    publish_event(
+        "battle_attached",
+        battle,
+        resumed=previous_battle is not None,
+        rqid=battle.rqid,
+    )
 
     if FoulPlayConfig.battle_timer != "none":
         await ps_websocket_client.send_message(
@@ -262,20 +316,30 @@ async def _run_battle_loop_with_auto_resume(
         result = await run_battle_loop(ps_websocket_client, battle)
         if result is not RECONNECT_RESUME:
             return result
-        resumed_battle, finished = await _resume_battle_state(
-            ps_websocket_client, pokemon_battle_type, battle.battle_tag
+        resumed_battle, finished = await attach_to_battle(
+            ps_websocket_client,
+            pokemon_battle_type,
+            battle.battle_tag,
+            previous_battle=battle,
         )
         if finished is not None:
             battle.win_reason = battle.win_reason or finished.get("win_reason")
             write_battle_summary(
                 battle, finished.get("winner"), ps_websocket_client.reconnect_count
             )
+            publish_event(
+                "battle_finished",
+                battle,
+                winner=finished.get("winner"),
+                win_reason=battle.win_reason,
+            )
+            clear_last_battle_tag()
             return finished.get("winner")
         battle = resumed_battle
 
 
 async def resume_battle(ps_websocket_client, pokemon_battle_type, battle_tag):
-    battle, finished = await _resume_battle_state(
+    battle, finished = await attach_to_battle(
         ps_websocket_client, pokemon_battle_type, battle_tag
     )
     if finished is not None:
