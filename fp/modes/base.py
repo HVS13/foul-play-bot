@@ -3,6 +3,7 @@ import concurrent.futures
 import json
 import logging
 import random
+import time
 from copy import copy, deepcopy
 
 from fp import constants
@@ -10,7 +11,8 @@ from fp.battle.state import Battle, Battler, LastUsedMove, Pokemon
 from fp.config import FoulPlayConfig
 from fp.constants import BattleType
 from fp.data.sets import SmogonSets
-from fp.search.main import find_best_move
+from fp.search.main import find_best_move_with_policy
+from fp.custom_features import log_suggested_moves, record_decision
 from fp.websocket_client import PSWebsocketClient
 
 logger = logging.getLogger(__name__)
@@ -197,18 +199,29 @@ def format_decision(battle, decision):
 
 
 async def async_pick_move(battle):
+    started = time.time()
     battle_copy = deepcopy(battle)
     if not battle_copy.team_preview:
         battle_copy.user.update_from_request_json(battle_copy.request_json)
 
     loop = asyncio.get_event_loop()
     with concurrent.futures.ThreadPoolExecutor() as pool:
-        best_move = await loop.run_in_executor(pool, find_best_move, battle_copy)
+        best_move, policy = await loop.run_in_executor(
+            pool, find_best_move_with_policy, battle_copy
+        )
+
+    elapsed_ms = int((time.time() - started) * 1000)
     battle.user.last_selected_move = LastUsedMove(
         battle.user.active.name,
         best_move.removesuffix("-tera").removesuffix("-mega"),
         battle.turn,
     )
+    try:
+        record_decision(battle, best_move, elapsed_ms, policy)
+    except Exception as exc:
+        logger.debug("Telemetry capture failed: %s", exc)
+    if FoulPlayConfig.suggest_only:
+        log_suggested_moves(battle, policy)
     return format_decision(battle_copy, best_move)
 
 
