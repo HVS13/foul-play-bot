@@ -33,6 +33,34 @@ def _message_indicates_battle_end(battle_tag, msg):
     )
 
 
+def _apply_room_rename(ps_websocket_client, battle, msg):
+    rename = ps_websocket_client.parse_room_rename(msg)
+    if rename is None:
+        return False
+
+    old_room, new_room = rename
+    current_room = battle.battle_tag
+    if current_room not in {old_room, new_room} and (
+        ps_websocket_client.resolve_room(current_room) != new_room
+    ):
+        return False
+    if current_room == new_room:
+        return False
+
+    battle.battle_tag = new_room
+    battle.room_rename_count = getattr(battle, "room_rename_count", 0) + 1
+    write_last_battle_tag(new_room)
+    publish_event(
+        "battle_room_renamed",
+        battle,
+        old_room=old_room,
+        new_room=new_room,
+        room_rename_count=battle.room_rename_count,
+    )
+    logger.info("Battle state moved to renamed room: %s -> %s", old_room, new_room)
+    return True
+
+
 async def start_battle(ps_websocket_client, pokemon_battle_type, team_dict):
     format_spec = FormatSpec.from_format_string(pokemon_battle_type)
     battle = await battle_mode(format_spec.battle_type).start_battle(
@@ -82,6 +110,7 @@ async def _finish_battle(ps_websocket_client, battle, msg):
 async def run_battle_loop(ps_websocket_client, battle):
     while True:
         msg = await ps_websocket_client.receive_message()
+        _apply_room_rename(ps_websocket_client, battle, msg)
         if battle.win_reason is None:
             battle.win_reason = extract_win_reason(msg)
         update_opponent_tendencies(battle, msg)
@@ -181,6 +210,7 @@ def _initialize_resume_datasets(battle, known_names, backlog_text):
 def _carry_session_metadata(battle, previous_battle):
     if previous_battle is None:
         battle.started_at = time.time()
+        battle.room_rename_count = 0
         return
 
     battle.started_at = previous_battle.started_at or time.time()
@@ -190,6 +220,7 @@ def _carry_session_metadata(battle, previous_battle):
     battle.win_reason = previous_battle.win_reason
     battle.replay_url = previous_battle.replay_url
     battle.replay_saved = previous_battle.replay_saved
+    battle.room_rename_count = getattr(previous_battle, "room_rename_count", 0)
     battle.opponent_tendencies = dict(previous_battle.opponent_tendencies)
 
 
@@ -208,9 +239,20 @@ async def attach_to_battle(
     player_map = {}
     known_names = set()
     request_json = None
+    attach_room_renames = 0
 
     while True:
         msg = await ps_websocket_client.receive_message()
+        rename = ps_websocket_client.parse_room_rename(msg)
+        if rename is not None:
+            old_room, new_room = rename
+            if battle_tag == old_room or ps_websocket_client.resolve_room(battle_tag) == new_room:
+                if battle_tag != new_room:
+                    battle_tag = new_room
+                    attach_room_renames += 1
+                    write_last_battle_tag(battle_tag)
+                continue
+
         msg_lines = msg.split("\n")
         first = msg_lines[0].strip() if msg_lines else ""
         if not first.startswith(">{}".format(battle_tag)):
@@ -243,6 +285,7 @@ async def attach_to_battle(
     format_spec = FormatSpec.from_format_string(pokemon_battle_type)
     battle = Battle(battle_tag)
     _carry_session_metadata(battle, previous_battle)
+    battle.room_rename_count += attach_room_renames
     battle.pokemon_format = pokemon_battle_type
     battle.generation = format_spec.generation
     battle.battle_type = format_spec.battle_type
