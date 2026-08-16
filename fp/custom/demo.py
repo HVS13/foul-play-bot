@@ -166,6 +166,11 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--loop", action="store_true")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="Run one demo sequence and exit; useful for automated smoke tests",
+    )
     args = parser.parse_args()
 
     url = start_dashboard(args.host, args.port)
@@ -174,15 +179,19 @@ def main() -> None:
 
     print("Dashboard: {}".format(url))
     print("Overlay: {}/overlay".format(url))
-    print("Press Ctrl+C to stop.")
+    if not args.once:
+        print("Press Ctrl+C to stop.")
 
+    demo_interval = max(0.0, args.interval)
     try:
         while True:
-            run_demo(max(0.2, args.interval))
+            run_demo(demo_interval)
+            if args.once:
+                break
             if not args.loop:
                 while True:
                     time.sleep(3600)
-            time.sleep(max(0.2, args.interval))
+            time.sleep(max(0.2, demo_interval))
     except KeyboardInterrupt:
         pass
     finally:
