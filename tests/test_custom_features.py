@@ -1,8 +1,11 @@
 from fp.battle.state import Battle
-from fp.config import _FoulPlayConfig
+from fp.config import FoulPlayConfig, _FoulPlayConfig
 from fp.custom.decisions import SearchResult, analyze_decision
+from fp.custom.demo import build_demo_battle
 from fp.custom.events import EventStore
 from fp.custom.opponent_model import update_opponent_tendencies
+from fp.custom.report import format_text, summarize
+from fp.custom.telemetry import DEFAULT_GUI_SUMMARY_JSON_PATH, _summary_json_path
 from fp.run_battle import _extract_request_json
 
 
@@ -89,3 +92,63 @@ def test_opponent_model_counts_only_voluntary_switches():
         "switches": 1,
         "protects": 1,
     }
+
+
+def test_gui_defaults_to_persistent_json_telemetry(monkeypatch):
+    monkeypatch.setattr(FoulPlayConfig, "gui", True, raising=False)
+    monkeypatch.setattr(FoulPlayConfig, "summary_json_path", None, raising=False)
+    assert _summary_json_path() == DEFAULT_GUI_SUMMARY_JSON_PATH
+
+    monkeypatch.setattr(
+        FoulPlayConfig, "summary_json_path", "custom/session.jsonl", raising=False
+    )
+    assert _summary_json_path() == "custom/session.jsonl"
+
+
+def test_demo_battle_is_usable_by_event_snapshot():
+    battle = build_demo_battle()
+    store = EventStore()
+    store.publish("battle_started", battle)
+    snapshot = store.snapshot()
+
+    assert snapshot["battle"]["battle_tag"] == "battle-demo-0001"
+    assert snapshot["battle"]["user"]["active"]["name"] == "greattusk"
+    assert snapshot["battle"]["opponent"]["active"]["name"] == "kingambit"
+
+
+def test_telemetry_report_surfaces_search_and_confidence():
+    report = summarize(
+        [
+            {
+                "winner": "Bot",
+                "win_reason": "normal",
+                "turns": 20,
+                "duration_seconds": 300,
+                "risk_mode": "auto",
+                "reconnect_count": 1,
+                "decision_log": [
+                    {
+                        "search_time_ms": 100,
+                        "policy_top": [
+                            {"move": "a", "weight": 0.5},
+                            {"move": "b", "weight": 0.48},
+                        ],
+                    },
+                    {
+                        "search_time_ms": 300,
+                        "policy_top": [
+                            {"move": "a", "weight": 0.7},
+                            {"move": "b", "weight": 0.2},
+                        ],
+                    },
+                ],
+            }
+        ],
+        username="Bot",
+    )
+
+    assert report["record"]["wins"] == 1
+    assert report["search_time_ms"]["avg"] == 200.0
+    assert report["confidence"]["low_confidence_count"] == 1
+    assert report["reconnects"] == 1
+    assert "Low-confidence decisions" in format_text(report)
