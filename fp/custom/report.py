@@ -89,14 +89,14 @@ def summarize(summaries: list[dict], username: str | None = None) -> dict:
             round(statistics.mean(durations), 2) if durations else None
         ),
         "search_time_ms": {
-            "avg": round(statistics.mean(decision_times), 2) if decision_times else None,
+            "avg": round(statistics.mean(decision_times), 2)
+            if decision_times
+            else None,
             "median": (
                 round(statistics.median(decision_times), 2) if decision_times else None
             ),
             "p95": (
-                round(_percentile(decision_times, 0.95), 2)
-                if decision_times
-                else None
+                round(_percentile(decision_times, 0.95), 2) if decision_times else None
             ),
             "max": round(max(decision_times), 2) if decision_times else None,
         },
@@ -174,9 +174,7 @@ def format_text(report: dict) -> str:
     if report["avg_turns"] is not None:
         lines.append("Average turns: {}".format(report["avg_turns"]))
     if report["avg_duration_seconds"] is not None:
-        lines.append(
-            "Average duration: {}s".format(report["avg_duration_seconds"])
-        )
+        lines.append("Average duration: {}s".format(report["avg_duration_seconds"]))
     return "\n".join(lines)
 
 
