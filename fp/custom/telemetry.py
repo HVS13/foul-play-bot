@@ -63,7 +63,9 @@ def extract_win_reason(msg: str) -> str | None:
     return reason
 
 
-def log_suggested_moves(battle, policy: list[tuple[str, float]], limit: int = 3) -> None:
+def log_suggested_moves(
+    battle, policy: list[tuple[str, float]], limit: int = 3
+) -> None:
     if not policy:
         logger.info("Suggested moves: <none>")
         return
