@@ -27,12 +27,8 @@ jobs:
           git remote add upstream https://github.com/pmariglia/foul-play.git
           git fetch upstream main
 
-          # Start a real merge so rename/delete history is handled by git.
           git merge --no-commit --no-ff upstream/main || true
 
-          # Your custom branch predates a large upstream refactor. For paths that
-          # conflict, take the current upstream version. Non-conflicting custom
-          # files and changes remain. Custom behavior is reapplied after this sync.
           while IFS= read -r path; do
             [ -z "$path" ] && continue
             if git ls-files -u -- "$path" | awk '$3 == 3 {found=1} END {exit !found}'; then
@@ -49,7 +45,10 @@ jobs:
             exit 1
           fi
 
-          # Remove this one-time workflow from the resulting branch.
+          # The checkout credential cannot push changes to workflow files.
+          # Keep this branch's workflow files for this push. The upstream
+          # update-data workflow is copied separately through the GitHub connector.
+          git checkout HEAD -- .github/workflows
           rm -f .github/workflows/sync-upstream-once.yml
           git add -A
 
