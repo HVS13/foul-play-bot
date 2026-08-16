@@ -246,7 +246,10 @@ async def attach_to_battle(
         rename = ps_websocket_client.parse_room_rename(msg)
         if rename is not None:
             old_room, new_room = rename
-            if battle_tag == old_room or ps_websocket_client.resolve_room(battle_tag) == new_room:
+            if (
+                battle_tag == old_room
+                or ps_websocket_client.resolve_room(battle_tag) == new_room
+            ):
                 if battle_tag != new_room:
                     battle_tag = new_room
                     attach_room_renames += 1
