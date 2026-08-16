@@ -7,6 +7,7 @@ import requests
 import websockets
 
 from fp.config import FoulPlayConfig
+from fp.custom.events import publish_event
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class PSWebsocketClient:
 
     async def _connect(self):
         self.websocket = await websockets.connect(self.address)
+        publish_event("connection_open", address=self.address)
 
     async def join_room(self, room_name):
         message = "/join {}".format(room_name)
@@ -76,9 +78,10 @@ class PSWebsocketClient:
         return command.startswith(("/choose", "/switch", "/team"))
 
     async def send_message(self, room, message_list):
-        if FoulPlayConfig.suggest_only and self._is_battle_choice(room, message_list):
+        is_battle_choice = self._is_battle_choice(room, message_list)
+        if FoulPlayConfig.suggest_only and is_battle_choice:
             logger.info("Suggest-only: not sending %s", message_list[0])
-            return
+            return False
 
         message = room + "|" + "|".join(message_list)
         logger.debug("Sending message to websocket: {}".format(message))
@@ -88,9 +91,15 @@ class PSWebsocketClient:
                 self.last_message = message
                 if room:
                     self.rooms.add(room)
-                return
+                return True
             except (websockets.ConnectionClosed, OSError) as exc:
                 await self._reconnect(exc)
+                if is_battle_choice:
+                    logger.warning(
+                        "Battle choice was invalidated by reconnect; rebuilding state "
+                        "instead of resending a stale request"
+                    )
+                    return False
 
     async def avatar(self, avatar):
         await self.send_message("", ["/avatar {}".format(avatar)])
@@ -113,6 +122,7 @@ class PSWebsocketClient:
     async def close(self):
         if self.websocket is not None:
             await self.websocket.close()
+        publish_event("connection_closed")
 
     async def get_id_and_challstr(self):
         while True:
@@ -174,6 +184,7 @@ class PSWebsocketClient:
         if max_retries <= 0:
             raise exc
 
+        publish_event("connection_lost", reason=str(exc))
         for attempt in range(1, max_retries + 1):
             wait_seconds = min(
                 FoulPlayConfig.reconnect_backoff_seconds * (2 ** (attempt - 1)),
@@ -198,6 +209,11 @@ class PSWebsocketClient:
                     await self.join_room(room)
                 self.reconnected = True
                 self.reconnect_count += 1
+                publish_event(
+                    "reconnected",
+                    reconnect_count=self.reconnect_count,
+                    rooms=rooms,
+                )
                 logger.info("Reconnected successfully")
                 return
             except Exception as reconnect_exc:
