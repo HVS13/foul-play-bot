@@ -30,6 +30,8 @@ class PSWebsocketClient:
     last_challenge_time = 0
     user_id = None
     rooms = None
+    room_aliases = None
+    recent_room_commands = None
     reconnected = False
     reconnect_count = 0
 
@@ -40,6 +42,8 @@ class PSWebsocketClient:
         self.password = password
         self.address = address
         self.rooms = set()
+        self.room_aliases = {}
+        self.recent_room_commands = {}
         self.reconnected = False
         self.reconnect_count = 0
         self.login_uri = (
@@ -54,7 +58,94 @@ class PSWebsocketClient:
         self.websocket = await websockets.connect(self.address)
         publish_event("connection_open", address=self.address)
 
+    def resolve_room(self, room_name):
+        if not room_name:
+            return room_name
+        current = room_name
+        visited = set()
+        while current in self.room_aliases and current not in visited:
+            visited.add(current)
+            current = self.room_aliases[current]
+        return current
+
+    @staticmethod
+    def parse_room_rename(message):
+        lines = message.split("\n")
+        source_room = lines[0][1:].strip() if lines and lines[0].startswith(">") else None
+        if not source_room:
+            return None
+        for line in lines[1:]:
+            split_line = line.split("|")
+            if (
+                len(split_line) >= 4
+                and split_line[1].strip() == "noinit"
+                and split_line[2].strip() == "rename"
+                and split_line[3].strip()
+            ):
+                return source_room, split_line[3].strip()
+        return None
+
+    def register_room_rename(self, old_room, new_room):
+        if not old_room or not new_room or old_room == new_room:
+            return
+
+        old_resolved = self.resolve_room(old_room)
+        for alias, target in list(self.room_aliases.items()):
+            if target in {old_room, old_resolved}:
+                self.room_aliases[alias] = new_room
+        self.room_aliases[old_room] = new_room
+        if old_resolved != old_room:
+            self.room_aliases[old_resolved] = new_room
+
+        self.rooms.discard(old_room)
+        self.rooms.discard(old_resolved)
+        self.rooms.add(new_room)
+        publish_event("room_renamed", old_room=old_room, new_room=new_room)
+        logger.info("Battle room renamed: %s -> %s", old_room, new_room)
+
+    @staticmethod
+    def _command_name(message_list):
+        if not message_list:
+            return None
+        first = message_list[0].strip().lower()
+        if not first.startswith("/"):
+            return None
+        return first.split()[0]
+
+    @staticmethod
+    def _rejected_room_command(message):
+        for line in message.split("\n"):
+            lower = line.lower()
+            if "/error /" not in lower or "must be used in a chat room" not in lower:
+                continue
+            error_text = lower.split("/error ", 1)[1]
+            return error_text.split()[0]
+        return None
+
+    async def _retry_rejected_room_command(self, message):
+        command = self._rejected_room_command(message)
+        if command not in {"/choose", "/switch", "/team", "/timer"}:
+            return False
+        recent = self.recent_room_commands.get(command)
+        if recent is None:
+            return False
+
+        old_room, message_list = recent
+        new_room = self.resolve_room(old_room)
+        if not new_room or new_room == old_room:
+            return False
+
+        logger.warning(
+            "Showdown rejected %s in renamed room %s; retrying in %s",
+            command,
+            old_room,
+            new_room,
+        )
+        await self.send_message(new_room, list(message_list))
+        return True
+
     async def join_room(self, room_name):
+        room_name = self.resolve_room(room_name)
         message = "/join {}".format(room_name)
         await self.send_message("", [message])
         if room_name:
@@ -66,6 +157,10 @@ class PSWebsocketClient:
             try:
                 message = await self.websocket.recv()
                 logger.debug("Received message from websocket: {}".format(message))
+                rename = self.parse_room_rename(message)
+                if rename is not None:
+                    self.register_room_rename(*rename)
+                await self._retry_rejected_room_command(message)
                 return message
             except (websockets.ConnectionClosed, OSError) as exc:
                 await self._reconnect(exc)
@@ -78,10 +173,15 @@ class PSWebsocketClient:
         return command.startswith(("/choose", "/switch", "/team"))
 
     async def send_message(self, room, message_list):
+        room = self.resolve_room(room)
         is_battle_choice = self._is_battle_choice(room, message_list)
         if FoulPlayConfig.suggest_only and is_battle_choice:
             logger.info("Suggest-only: not sending %s", message_list[0])
             return False
+
+        command_name = self._command_name(message_list)
+        if room and command_name in {"/choose", "/switch", "/team", "/timer"}:
+            self.recent_room_commands[command_name] = (room, list(message_list))
 
         message = room + "|" + "|".join(message_list)
         logger.debug("Sending message to websocket: {}".format(message))
@@ -100,6 +200,8 @@ class PSWebsocketClient:
                         "instead of resending a stale request"
                     )
                     return False
+                room = self.resolve_room(room)
+                message = room + "|" + "|".join(message_list)
 
     async def avatar(self, avatar):
         await self.send_message("", ["/avatar {}".format(avatar)])
@@ -137,7 +239,8 @@ class PSWebsocketClient:
         guest_login = self.password is None
 
         if guest_login:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 self.login_uri,
                 data={
                     "act": "getassertion",
@@ -146,7 +249,8 @@ class PSWebsocketClient:
                 },
             )
         else:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 self.login_uri,
                 data={
                     "name": self.username,
@@ -203,7 +307,7 @@ class PSWebsocketClient:
                 await self.login()
                 if FoulPlayConfig.avatar is not None:
                     await self.avatar(FoulPlayConfig.avatar)
-                rooms = list(self.rooms)
+                rooms = [self.resolve_room(room) for room in self.rooms]
                 self.rooms.clear()
                 for room in rooms:
                     await self.join_room(room)
@@ -265,11 +369,14 @@ class PSWebsocketClient:
         await self.send_message("", ["/search {}".format(battle_format)])
 
     async def leave_battle(self, battle_tag):
+        battle_tag = self.resolve_room(battle_tag)
         await self.send_message("", ["/leave {}".format(battle_tag)])
         while True:
             msg = await self.receive_message()
             if battle_tag in msg and "deinit" in msg:
+                self.rooms.discard(battle_tag)
                 return
 
     async def save_replay(self, battle_tag):
+        battle_tag = self.resolve_room(battle_tag)
         await self.send_message(battle_tag, ["/savereplay"])
