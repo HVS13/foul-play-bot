@@ -146,9 +146,14 @@ def _risk_threshold(risk_mode: RiskModes) -> float:
     return 0.75
 
 
+def _configured_risk_mode() -> RiskModes:
+    return getattr(FoulPlayConfig, "risk_mode", RiskModes.balanced)
+
+
 def _resolve_risk_mode(battle: Battle | None) -> RiskModes:
-    if FoulPlayConfig.risk_mode != RiskModes.auto:
-        return FoulPlayConfig.risk_mode
+    configured_risk_mode = _configured_risk_mode()
+    if configured_risk_mode != RiskModes.auto:
+        return configured_risk_mode
     if battle is None or battle.team_preview:
         return RiskModes.balanced
 
@@ -349,7 +354,7 @@ def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, flo
     final_policy = _apply_opponent_tendency_bias(battle, final_policy)
     resolved_risk = _resolve_risk_mode(battle)
     choice = select_move_from_policy(
-        final_policy, resolved_risk, FoulPlayConfig.risk_mode
+        final_policy, resolved_risk, _configured_risk_mode()
     )
     logger.info("Choice: {}".format(choice))
     return choice, final_policy
