@@ -146,7 +146,9 @@ class PSWebsocketClient:
             )
 
         if response.status_code != 200:
-            logger.error("Could not get assertion\nDetails:\n{}".format(response.content))
+            logger.error(
+                "Could not get assertion\nDetails:\n{}".format(response.content)
+            )
             raise LoginError("Could not get assertion")
 
         if guest_login:
@@ -162,7 +164,9 @@ class PSWebsocketClient:
         logger.info("Successfully logged in")
         await self.send_message("", message)
         await asyncio.sleep(3)
-        self.user_id = self.username if guest_login else response_json["curuser"]["userid"]
+        self.user_id = (
+            self.username if guest_login else response_json["curuser"]["userid"]
+        )
         return self.user_id
 
     async def _reconnect(self, exc):
@@ -197,7 +201,9 @@ class PSWebsocketClient:
                 logger.info("Reconnected successfully")
                 return
             except Exception as reconnect_exc:
-                logger.warning("Reconnect attempt %s failed: %s", attempt, reconnect_exc)
+                logger.warning(
+                    "Reconnect attempt %s failed: %s", attempt, reconnect_exc
+                )
 
         logger.error("Max reconnect attempts reached")
         raise exc

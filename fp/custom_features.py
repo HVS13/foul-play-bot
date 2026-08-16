@@ -104,19 +104,25 @@ def update_opponent_tendencies(battle, msg):
         elif action == "move":
             tendencies["moves"] += 1
             tendencies["actions"] += 1
-            if len(split_line) > 3 and normalize_name(split_line[3]) in _PROTECT_MOVE_IDS:
+            if (
+                len(split_line) > 3
+                and normalize_name(split_line[3]) in _PROTECT_MOVE_IDS
+            ):
                 tendencies["protects"] += 1
 
 
 def _is_setup_move(move_json):
     return constants.BOOSTS in move_json or (
-        constants.SELF in move_json
-        and constants.BOOSTS in move_json[constants.SELF]
+        constants.SELF in move_json and constants.BOOSTS in move_json[constants.SELF]
     )
 
 
 def _move_can_ko(battle, move_id):
-    if battle.team_preview or battle.user.active is None or battle.opponent.active is None:
+    if (
+        battle.team_preview
+        or battle.user.active is None
+        or battle.opponent.active is None
+    ):
         return False
     battle_copy = deepcopy(battle)
     if battle_copy.request_json is not None:
@@ -246,7 +252,11 @@ def write_battle_summary(battle, winner, reconnect_count=0):
 
     if FoulPlayConfig.summary_path:
         ensure_parent(FoulPlayConfig.summary_path)
-        lines = ["{}: {}".format(key, value) for key, value in summary.items() if key != "decision_log"]
+        lines = [
+            "{}: {}".format(key, value)
+            for key, value in summary.items()
+            if key != "decision_log"
+        ]
         with open(FoulPlayConfig.summary_path, "a", encoding="utf-8") as handle:
             handle.write("\n".join(lines) + "\n\n")
 

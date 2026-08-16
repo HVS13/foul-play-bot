@@ -125,12 +125,18 @@ class _FoulPlayConfig:
             else:
                 raise ValueError("Config file must use .toml or .json")
         except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("Failed to load config file {}: {}".format(config_path, exc)) from exc
+            raise ValueError(
+                "Failed to load config file {}: {}".format(config_path, exc)
+            ) from exc
 
-        if isinstance(raw_config, dict) and isinstance(raw_config.get("foul_play"), dict):
+        if isinstance(raw_config, dict) and isinstance(
+            raw_config.get("foul_play"), dict
+        ):
             raw_config = raw_config["foul_play"]
         if not isinstance(raw_config, dict):
-            raise ValueError("Config file must contain an object/table at the top level")
+            raise ValueError(
+                "Config file must contain an object/table at the top level"
+            )
 
         normalized = {}
         for key, value in raw_config.items():
@@ -150,7 +156,9 @@ class _FoulPlayConfig:
         config_defaults = self._load_config_file(config_args.config)
 
         parser = argparse.ArgumentParser()
-        parser.add_argument("--config", default=None, help="Path to a .toml or .json config file")
+        parser.add_argument(
+            "--config", default=None, help="Path to a .toml or .json config file"
+        )
         parser.add_argument(
             "--websocket-uri",
             default=None,
@@ -159,9 +167,13 @@ class _FoulPlayConfig:
         parser.add_argument("--ps-username", default=None)
         parser.add_argument("--ps-password", default=None)
         parser.add_argument("--ps-avatar", default=None)
-        parser.add_argument("--bot-mode", default=None, choices=[e.name for e in BotModes])
+        parser.add_argument(
+            "--bot-mode", default=None, choices=[e.name for e in BotModes]
+        )
         parser.add_argument("--user-to-challenge", default=None)
-        parser.add_argument("--pokemon-format", default=None, help="e.g. gen9randombattle")
+        parser.add_argument(
+            "--pokemon-format", default=None, help="e.g. gen9randombattle"
+        )
         parser.add_argument("--smogon-stats-format", default=None)
         parser.add_argument("--search-time-ms", type=int, default=100)
         parser.add_argument("--search-parallelism", type=int, default=1)
@@ -235,7 +247,9 @@ class _FoulPlayConfig:
         if args.auto_parallelism:
             self.parallelism = self._auto_parallelism(args.parallelism_cap)
         self.parallelism = max(1, self.parallelism)
-        self.team_preview_search_time_ms = args.team_preview_search_time_ms or self.search_time_ms
+        self.team_preview_search_time_ms = (
+            args.team_preview_search_time_ms or self.search_time_ms
+        )
         self.team_preview_search_parallelism = (
             args.team_preview_search_parallelism or self.parallelism
         )
@@ -304,13 +318,13 @@ class _FoulPlayConfig:
         if not self.pokemon_format:
             raise AssertionError("POKEMON_FORMAT is required")
         if self.bot_mode == BotModes.challenge_user:
-            assert self.user_to_challenge is not None, (
-                "If bot_mode is `CHALLENGE_USER`, you must declare USER_TO_CHALLENGE"
-            )
+            assert (
+                self.user_to_challenge is not None
+            ), "If bot_mode is `CHALLENGE_USER`, you must declare USER_TO_CHALLENGE"
         if self.bot_mode == BotModes.resume_battle:
-            assert self.battle_tag is not None, (
-                "If bot_mode is `RESUME_BATTLE`, you must declare BATTLE_TAG or BATTLE_URL"
-            )
+            assert (
+                self.battle_tag is not None
+            ), "If bot_mode is `RESUME_BATTLE`, you must declare BATTLE_TAG or BATTLE_URL"
             self.run_count = 1
 
 

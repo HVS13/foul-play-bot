@@ -97,7 +97,11 @@ async def run_battle_loop(ps_websocket_client, battle):
 def _extract_request_json(msg_lines):
     for line in msg_lines:
         split_line = line.split("|")
-        if len(split_line) >= 3 and split_line[1].strip() == "request" and split_line[2].strip():
+        if (
+            len(split_line) >= 3
+            and split_line[1].strip() == "request"
+            and split_line[2].strip()
+        ):
             return json.loads(split_line[2].strip("'"))
     return None
 
@@ -115,7 +119,13 @@ def _collect_known_pokemon(msg_lines, known_names):
         split_line = line.split("|")
         if len(split_line) < 4:
             continue
-        if split_line[1].strip() in {"poke", "switch", "drag", "replace", "detailschange"}:
+        if split_line[1].strip() in {
+            "poke",
+            "switch",
+            "drag",
+            "replace",
+            "detailschange",
+        }:
             name = normalize_name(split_line[3].split(",")[0])
             if name:
                 known_names.add(name)
@@ -168,9 +178,8 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
             clear_last_battle_tag()
             return None, {
                 "winner": extract_winner(msg),
-                "win_reason": extract_win_reason(msg) or (
-                    "tie" if constants.TIE_STRING in msg else "normal"
-                ),
+                "win_reason": extract_win_reason(msg)
+                or ("tie" if constants.TIE_STRING in msg else "normal"),
             }
 
         backlog_msgs.append(msg)
@@ -195,7 +204,9 @@ async def _resume_battle_state(ps_websocket_client, pokemon_battle_type, battle_
 
     user_side, opponent_side, opponent_account = _resolve_player_sides(player_map)
     if user_side is None or opponent_side is None:
-        raise ValueError("Could not match logged-in user to battle players: {}".format(player_map))
+        raise ValueError(
+            "Could not match logged-in user to battle players: {}".format(player_map)
+        )
     battle.user.name = user_side
     battle.opponent.name = opponent_side
     battle.opponent.account_name = opponent_account

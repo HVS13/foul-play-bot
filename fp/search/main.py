@@ -64,16 +64,15 @@ def compute_final_policy(
             )
         )
         for option in mcts_result.side_one:
-            final_policy[option.move_choice] = final_policy.get(option.move_choice, 0) + (
-                sample_chance * (option.visits / mcts_result.total_visits)
-            )
+            final_policy[option.move_choice] = final_policy.get(
+                option.move_choice, 0
+            ) + (sample_chance * (option.visits / mcts_result.total_visits))
     return sorted(final_policy.items(), key=lambda x: x[1], reverse=True)
 
 
 def _is_setup_move(move_json):
     return constants.BOOSTS in move_json or (
-        constants.SELF in move_json
-        and constants.BOOSTS in move_json[constants.SELF]
+        constants.SELF in move_json and constants.BOOSTS in move_json[constants.SELF]
     )
 
 
@@ -193,7 +192,9 @@ def select_move_from_policy(
     if risk_mode == RiskModes.safe:
         return choices[0][0]
     weight_power = 0.7 if risk_mode == RiskModes.aggressive else 1.0
-    return random.choices(choices, weights=[p[1] ** weight_power for p in choices])[0][0]
+    return random.choices(choices, weights=[p[1] ** weight_power for p in choices])[0][
+        0
+    ]
 
 
 def select_move_from_mcts_results(
@@ -255,11 +256,14 @@ def _estimate_branching_factor(battle: Battle) -> int:
 
     num_moves = 0
     if not battle.force_switch:
-        num_moves = sum(
-            1
-            for move in battle.user.active.moves
-            if not move.disabled and move.current_pp > 0
-        ) or 1
+        num_moves = (
+            sum(
+                1
+                for move in battle.user.active.moves
+                if not move.disabled and move.current_pp > 0
+            )
+            or 1
+        )
     num_switches = 0
     if battle.force_switch or not battle.user.trapped:
         num_switches = sum(1 for pokemon in battle.user.reserve if pokemon.is_alive())
@@ -344,7 +348,9 @@ def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, flo
 
     final_policy = _apply_opponent_tendency_bias(battle, final_policy)
     resolved_risk = _resolve_risk_mode(battle)
-    choice = select_move_from_policy(final_policy, resolved_risk, FoulPlayConfig.risk_mode)
+    choice = select_move_from_policy(
+        final_policy, resolved_risk, FoulPlayConfig.risk_mode
+    )
     logger.info("Choice: {}".format(choice))
     return choice, final_policy
 
