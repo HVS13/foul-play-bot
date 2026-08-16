@@ -45,9 +45,7 @@ def _battle_snapshot(battle) -> dict:
                 getattr(getattr(battle, "opponent", None), "active", None)
             ),
         },
-        "opponent_tendencies": dict(
-            getattr(battle, "opponent_tendencies", {}) or {}
-        ),
+        "opponent_tendencies": dict(getattr(battle, "opponent_tendencies", {}) or {}),
     }
 
 
