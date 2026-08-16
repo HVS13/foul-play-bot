@@ -184,7 +184,7 @@ def format_text(report: dict) -> str:
         )
     )
     lines.append(
-        "Recovery: {} reconnects | {} room renames".format(
+        "Reconnects: {} | room renames: {}".format(
             report["reconnects"], report["room_renames"]
         )
     )
