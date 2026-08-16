@@ -232,72 +232,46 @@ def _count_alive(battler):
     return alive + sum(1 for pokemon in battler.reserve if pokemon.is_alive())
 
 
-def _estimate_branching_factor(battle: Battle) -> int:
-    if battle.team_preview:
-        return max(1, len(battle.user.reserve) + int(battle.user.active is not None))
-    if battle.user.active is None:
-        return 1
-
-    num_moves = 0
-    if not battle.force_switch:
-        num_moves = (
-            sum(
-                1
-                for move in battle.user.active.moves
-                if not move.disabled and move.current_pp > 0
-            )
-            or 1
-        )
-    num_switches = 0
-    if battle.force_switch or not battle.user.trapped:
-        num_switches = sum(1 for pokemon in battle.user.reserve if pokemon.is_alive())
-    return max(1, num_moves + num_switches)
-
-
 def _adjust_search(battle: Battle, num_battles: int, search_time_ms: int):
+    """Preserve the mode's breadth/depth plan and only shorten it for the timer."""
     if battle.team_preview:
         return (
             max(1, FoulPlayConfig.team_preview_search_parallelism),
             max(25, FoulPlayConfig.team_preview_search_time_ms),
         )
 
-    multiplier = 1.0
-    turn = battle.turn or 0
-    if turn >= 20:
-        multiplier += 0.25
-    if turn >= 30:
-        multiplier += 0.25
-    if (_get_hp_pct(battle.user.active) or 1) <= 0.25:
-        multiplier += 0.25
-    if (_get_hp_pct(battle.opponent.active) or 1) <= 0.25:
-        multiplier += 0.25
-    if _count_alive(battle.user) <= 2 or _count_alive(battle.opponent) <= 2:
-        multiplier += 0.25
+    time_scale = 1.0
     if battle.time_remaining is not None:
         if battle.time_remaining <= 30:
-            multiplier *= 0.5
+            time_scale = 0.5
         elif battle.time_remaining <= 60:
-            multiplier *= 0.75
+            time_scale = 0.75
 
-    branching = _estimate_branching_factor(battle)
-    battle_multiplier = 1.0
-    if branching <= 2:
-        multiplier *= 0.70
-        battle_multiplier = 0.70
-    elif branching <= 3:
-        multiplier *= 0.85
-        battle_multiplier = 0.85
-    elif branching >= 8:
-        multiplier *= 1.25
-        battle_multiplier = 1.20
-    elif branching >= 6:
-        multiplier *= 1.15
-        battle_multiplier = 1.10
+    return max(1, num_battles), max(25, int(search_time_ms * time_scale))
 
-    return (
-        max(1, int(num_battles * battle_multiplier)),
-        max(25, int(search_time_ms * min(max(multiplier, 0.5), 2.0))),
-    )
+
+def _allocate_search_pass_times(
+    search_time_ms: int, allow_retry: bool
+) -> tuple[int, int]:
+    """Reserve retry time inside the original per-state budget."""
+    search_time_ms = max(25, int(search_time_ms))
+    if not allow_retry or search_time_ms < 100:
+        return search_time_ms, 0
+
+    retry_time_ms = max(25, int(search_time_ms * 0.20))
+    first_pass_time_ms = search_time_ms - retry_time_ms
+    if first_pass_time_ms < 25:
+        return search_time_ms, 0
+    return first_pass_time_ms, retry_time_ms
+
+
+def _scale_result_weights(results, multiplier: float):
+    if multiplier == 1.0:
+        return results
+    return [
+        (mcts_result, sample_chance * multiplier, index)
+        for mcts_result, sample_chance, index in results
+    ]
 
 
 def _policy_confidence_ratio(policy: list[tuple[str, float]]) -> float:
@@ -315,29 +289,46 @@ def find_best_move_result(battle: Battle) -> SearchResult:
     num_battles, search_time_ms = battle.mode.search_params(battle)
     num_battles, search_time_ms = _adjust_search(battle, num_battles, search_time_ms)
     battles = battle.mode.prepare_battles(battle, num_battles)
+
+    allow_retry = not battle.team_preview and (
+        battle.time_remaining is None or battle.time_remaining > 30
+    )
+    first_pass_time_ms, retry_time_ms = _allocate_search_pass_times(
+        search_time_ms, allow_retry
+    )
+
     logger.info("Searching for a move using MCTS...")
-    logger.info("Sampling %s battles at %sms each", num_battles, search_time_ms)
+    logger.info(
+        "Sampling %s battles at %sms each (budget %sms/state)",
+        num_battles,
+        first_pass_time_ms,
+        search_time_ms,
+    )
     publish_event(
         "search_started",
         battle,
         sampled_states=len(battles),
-        search_time_per_state_ms=search_time_ms,
+        search_time_per_state_ms=first_pass_time_ms,
+        search_budget_per_state_ms=search_time_ms,
+        retry_reserved_ms=retry_time_ms,
     )
 
     started = time.perf_counter()
-    results = _run_mcts_batch(battles, search_time_ms)
+    results = _run_mcts_batch(battles, first_pass_time_ms)
     final_policy = compute_final_policy(results)
     search_passes = 1
+    used_time_per_state_ms = first_pass_time_ms
 
-    if (
-        not battle.team_preview
-        and _policy_confidence_ratio(final_policy) < 1.15
-        and (battle.time_remaining is None or battle.time_remaining > 30)
-    ):
-        logger.info("Low-confidence policy; running one extra search pass")
-        results += _run_mcts_batch(battles, max(25, int(search_time_ms * 0.5)))
+    if retry_time_ms and _policy_confidence_ratio(final_policy) < 1.15:
+        logger.info(
+            "Low-confidence policy; using reserved %sms retry budget", retry_time_ms
+        )
+        retry_results = _run_mcts_batch(battles, retry_time_ms)
+        retry_weight = retry_time_ms / first_pass_time_ms
+        results += _scale_result_weights(retry_results, retry_weight)
         final_policy = compute_final_policy(results)
         search_passes = 2
+        used_time_per_state_ms += retry_time_ms
 
     final_policy = _apply_opponent_tendency_bias(battle, final_policy)
     resolved_risk = _resolve_risk_mode(battle)
@@ -352,7 +343,7 @@ def find_best_move_result(battle: Battle) -> SearchResult:
         confidence_ratio=_policy_confidence_ratio(final_policy),
         sampled_states=len(battles),
         search_passes=search_passes,
-        search_time_per_state_ms=search_time_ms,
+        search_time_per_state_ms=used_time_per_state_ms,
         total_search_time_ms=total_search_time_ms,
         risk_mode=resolved_risk.name,
     )
