@@ -1,15 +1,15 @@
 import atexit
 import logging
 import random
+import time
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from copy import deepcopy
 
-from fp import constants
-from fp.battle.helpers import normalize_name
 from fp.battle.state import Battle
 from fp.config import FoulPlayConfig, RiskModes
-from fp.data import all_move_json
+from fp.custom.decisions import SearchResult, analyze_decision
+from fp.custom.events import publish_event
 from fp.search.poke_engine_helpers import battle_to_poke_engine_state
 
 from poke_engine import State as PokeEngineState, monte_carlo_tree_search, MctsResult
@@ -48,18 +48,27 @@ def _reset_process_pool():
     _executor_workers = FoulPlayConfig.parallelism
 
 
+def _normalize_policy(policy: list[tuple[str, float]]) -> list[tuple[str, float]]:
+    total = sum(weight for _, weight in policy)
+    if total <= 0:
+        return policy
+    return [(move, weight / total) for move, weight in policy]
+
+
 def compute_final_policy(
     mcts_results: list[tuple[MctsResult, float, int]],
 ) -> list[tuple[str, float]]:
     final_policy = {}
     for mcts_result, sample_chance, index in mcts_results:
+        if mcts_result.total_visits <= 0 or not mcts_result.side_one:
+            continue
         this_policy = max(mcts_result.side_one, key=lambda x: x.visits)
         logger.info(
             "Policy {}: {} visited {}% avg_score={} sample_chance_multiplier={}".format(
                 index,
                 this_policy.move_choice,
                 round(100 * this_policy.visits / mcts_result.total_visits, 2),
-                round(this_policy.total_score / this_policy.visits, 3),
+                round(this_policy.total_score / max(this_policy.visits, 1), 3),
                 round(sample_chance, 3),
             )
         )
@@ -67,50 +76,16 @@ def compute_final_policy(
             final_policy[option.move_choice] = final_policy.get(
                 option.move_choice, 0
             ) + (sample_chance * (option.visits / mcts_result.total_visits))
-    return sorted(final_policy.items(), key=lambda x: x[1], reverse=True)
 
-
-def _is_setup_move(move_json):
-    return constants.BOOSTS in move_json or (
-        constants.SELF in move_json and constants.BOOSTS in move_json[constants.SELF]
-    )
-
-
-_PROTECT_MOVE_IDS = set(
-    constants.PROTECT_VOLATILE_STATUSES
-    + ["detect", "kingsshield", "obstruct", "silktrap"]
-)
-
-
-def _decision_tags(decision: str) -> set[str]:
-    decision = decision.removesuffix("-tera").removesuffix("-mega")
-    tags = set()
-    if decision.startswith(constants.SWITCH_STRING + " "):
-        tags.add("switch")
-        return tags
-
-    move_id = normalize_name(decision)
-    if move_id in constants.SWITCH_OUT_MOVES:
-        tags.add("pivot")
-    if move_id in _PROTECT_MOVE_IDS:
-        tags.add("protect")
-    move_json = all_move_json.get(move_id)
-    if move_json is None:
-        return tags
-    if move_json.get(constants.CATEGORY) == constants.MoveCategory.STATUS:
-        tags.add("status")
-    else:
-        tags.add("attack")
-    if _is_setup_move(move_json):
-        tags.add("setup")
-    return tags
+    sorted_policy = sorted(final_policy.items(), key=lambda x: x[1], reverse=True)
+    return _normalize_policy(sorted_policy)
 
 
 def _apply_opponent_tendency_bias(
     battle: Battle, final_policy: list[tuple[str, float]]
 ) -> list[tuple[str, float]]:
     tendencies = getattr(battle, "opponent_tendencies", None)
-    if not tendencies or tendencies.get("actions", 0) < 5:
+    if not tendencies or tendencies.get("actions", 0) < 8:
         return final_policy
 
     actions = tendencies.get("actions", 0)
@@ -122,7 +97,7 @@ def _apply_opponent_tendency_bias(
 
     adjusted = []
     for move, weight in final_policy:
-        tags = _decision_tags(move)
+        tags = set(analyze_decision(None, move).tags)
         multiplier = 1.0
         if switch_rate >= 0.45 and tags.intersection({"pivot", "setup", "status"}):
             multiplier += 0.08
@@ -130,6 +105,7 @@ def _apply_opponent_tendency_bias(
             multiplier += 0.05
         adjusted.append((move, weight * multiplier))
     adjusted.sort(key=lambda x: x[1], reverse=True)
+    adjusted = _normalize_policy(adjusted)
     logger.info(
         "Opponent tendency bias: switch_rate=%.2f protect_rate=%.2f",
         switch_rate,
@@ -207,7 +183,7 @@ def select_move_from_mcts_results(
 ) -> str:
     policy = compute_final_policy(mcts_results)
     mode = _resolve_risk_mode(None)
-    return select_move_from_policy(policy, mode, FoulPlayConfig.risk_mode)
+    return select_move_from_policy(policy, mode, _configured_risk_mode())
 
 
 def get_result_from_mcts(
@@ -236,10 +212,13 @@ def _run_mcts_batch(battles, search_time_ms: int):
                 futures.append((future, chance, index))
             return [(f.result(), chance, index) for f, chance, index in futures]
         except BrokenProcessPool:
+            for future, _, _ in futures:
+                future.cancel()
             logger.warning("MCTS worker pool crashed; recreating pool")
             _reset_process_pool()
             if attempt == 1:
                 raise
+    raise RuntimeError("MCTS search failed without a result")
 
 
 def _get_hp_pct(pokemon):
@@ -327,7 +306,7 @@ def _policy_confidence_ratio(policy: list[tuple[str, float]]) -> float:
     return policy[0][1] / policy[1][1]
 
 
-def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, float]]]:
+def find_best_move_result(battle: Battle) -> SearchResult:
     battle = deepcopy(battle)
     if battle.team_preview:
         battle.user.active = battle.user.reserve.pop(0)
@@ -338,9 +317,17 @@ def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, flo
     battles = battle.mode.prepare_battles(battle, num_battles)
     logger.info("Searching for a move using MCTS...")
     logger.info("Sampling %s battles at %sms each", num_battles, search_time_ms)
+    publish_event(
+        "search_started",
+        battle,
+        sampled_states=len(battles),
+        search_time_per_state_ms=search_time_ms,
+    )
 
+    started = time.perf_counter()
     results = _run_mcts_batch(battles, search_time_ms)
     final_policy = compute_final_policy(results)
+    search_passes = 1
 
     if (
         not battle.team_preview
@@ -350,15 +337,31 @@ def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, flo
         logger.info("Low-confidence policy; running one extra search pass")
         results += _run_mcts_batch(battles, max(25, int(search_time_ms * 0.5)))
         final_policy = compute_final_policy(results)
+        search_passes = 2
 
     final_policy = _apply_opponent_tendency_bias(battle, final_policy)
     resolved_risk = _resolve_risk_mode(battle)
     choice = select_move_from_policy(
         final_policy, resolved_risk, _configured_risk_mode()
     )
+    total_search_time_ms = int((time.perf_counter() - started) * 1000)
     logger.info("Choice: {}".format(choice))
-    return choice, final_policy
+    return SearchResult(
+        choice=choice,
+        policy=final_policy,
+        confidence_ratio=_policy_confidence_ratio(final_policy),
+        sampled_states=len(battles),
+        search_passes=search_passes,
+        search_time_per_state_ms=search_time_ms,
+        total_search_time_ms=total_search_time_ms,
+        risk_mode=resolved_risk.name,
+    )
+
+
+def find_best_move_with_policy(battle: Battle) -> tuple[str, list[tuple[str, float]]]:
+    result = find_best_move_result(battle)
+    return result.choice, result.policy
 
 
 def find_best_move(battle: Battle) -> str:
-    return find_best_move_with_policy(battle)[0]
+    return find_best_move_result(battle).choice
