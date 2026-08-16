@@ -2,27 +2,20 @@ import logging
 import random
 from copy import deepcopy
 
-from constants import BattleType
-from fp.battle import Battle, Pokemon
-from data.pkmn_sets import RandomBattleTeamDatasets, TeamDatasets
+from fp.data import pokedex
+from fp.battle.state import Battle, Pokemon
 from fp.search.helpers import populate_pkmn_from_set
-from fp.helpers import (
+from fp.battle.helpers import (
     POKEMON_TYPE_INDICES,
     is_super_effective,
     type_effectiveness_modifier,
+    normalize_name,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def get_all_remaining_sets_for_revealed_pkmn(battle: Battle) -> dict:
-    if battle.battle_type == BattleType.RANDOM_BATTLE:
-        datasets = RandomBattleTeamDatasets
-    elif battle.battle_type == BattleType.BATTLE_FACTORY:
-        datasets = TeamDatasets
-    else:
-        raise ValueError("Only random battles are supported")
-
     revealed_pkmn = []
     for pkmn in battle.opponent.reserve:
         revealed_pkmn.append(pkmn)
@@ -31,7 +24,7 @@ def get_all_remaining_sets_for_revealed_pkmn(battle: Battle) -> dict:
 
     ret = {}
     for pkmn in revealed_pkmn:
-        sets = datasets.get_all_remaining_sets(pkmn)
+        sets = battle.mode.get_all_remaining_sets(pkmn)
         random.shuffle(sets)
         ret[pkmn.name] = sets
 
@@ -70,20 +63,32 @@ def prepare_random_battles(battle: Battle, num_battles: int) -> list[(Battle, fl
     return sampled_battles
 
 
-def sample_randombattle_pokemon(existing_pokemon: list[Pokemon]) -> Pokemon:
+def sample_randombattle_pokemon(existing_pokemon: list[Pokemon], datasets) -> Pokemon:
+    def is_mega(pkmn: Pokemon):
+        if normalize_name(pokedex.get(pkmn.name, {}).get("forme", "")).startswith(
+            "mega"
+        ):
+            return True
+        for mega_name, mega_item in pkmn.get_mega_pkmn_info():
+            if pkmn.item == mega_item:
+                return True
+
+        return False
+
     ok = False
     existing_pokemon_names = {pkmn.name for pkmn in existing_pokemon}
+    has_mega = any(is_mega(p) for p in existing_pokemon)
 
     sample_count = 0
     while not ok:
         sample_count += 1
         ok = True
-        pkmn_name, pkmn_sets = random.choice(
-            list(RandomBattleTeamDatasets.pkmn_sets.items())
-        )
+        pkmn_name, pkmn_sets = random.choice(list(datasets.pkmn_sets.items()))
         pkmn_full_set = random.choice(pkmn_sets)
         pkmn = Pokemon(pkmn_name, pkmn_full_set.pkmn_set.level)
         if pkmn_name in existing_pokemon_names:
+            ok = False
+        if sample_count < 10 and is_mega(pkmn) and has_mega:
             ok = False
         if sample_count < 10 and _more_than_3_pokemon_weak_to_a_given_typing(
             existing_pokemon + [pkmn]
@@ -172,7 +177,7 @@ def populate_randombattle_unrevealed_pkmn(battle: Battle):
 
     logger.info("Sampling {} unrevealed pokemon".format(6 - num_revealed_pkmn))
     while num_revealed_pkmn < 6:
-        pkmn = sample_randombattle_pokemon(existing_pkmn)
+        pkmn = sample_randombattle_pokemon(existing_pkmn, battle.mode.datasets)
         existing_pkmn.append(pkmn)
         battle.opponent.reserve.append(pkmn)
         num_revealed_pkmn += 1
