@@ -49,6 +49,7 @@ Do not replace or broadly rewrite upstream search/sampling architecture merely t
 - Never automatically resend a battle choice after a websocket reconnect. Rebuild current state and calculate against the latest request instead.
 - Pokémon Showdown room renames are transport aliases. Resolve commands to the canonical room and update the active session tag without moving room-routing logic into the battle engine.
 - Preserve upstream public search helpers (`find_best_move`, `find_best_move_with_policy`) for compatibility; new local consumers use `find_best_move_result`.
+- Treat each battle mode's breadth × depth search plan as a compute ceiling. Local adaptation may shorten it under timer pressure or reserve part of it for a confidence retry, but must not multiply both dimensions and exceed the mode's intended budget.
 
 ## Current MVP
 IN:

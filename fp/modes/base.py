@@ -216,7 +216,13 @@ async def async_pick_move(battle):
     )
     telemetry = None
     try:
-        telemetry = record_decision(battle, best_move, elapsed_ms, policy)
+        telemetry = record_decision(
+            battle,
+            best_move,
+            elapsed_ms,
+            policy,
+            search_result=result,
+        )
     except Exception as exc:
         logger.debug("Telemetry capture failed: %s", exc)
     publish_event(

@@ -86,7 +86,9 @@ def _policy_confidence(policy) -> float | None:
     return round(policy[0][1] / policy[1][1], 4)
 
 
-def record_decision(battle, decision: str, elapsed_ms: int, policy=None) -> dict:
+def record_decision(
+    battle, decision: str, elapsed_ms: int, policy=None, search_result=None
+) -> dict:
     battle.search_times_ms.append(elapsed_ms)
     battle.decision_count += 1
 
@@ -101,6 +103,24 @@ def record_decision(battle, decision: str, elapsed_ms: int, policy=None) -> dict
         "confidence_ratio": _policy_confidence(policy),
         "tags": list(decision_info.tags),
     }
+    if search_result is not None:
+        result = (
+            search_result.to_dict()
+            if hasattr(search_result, "to_dict")
+            else dict(search_result)
+        )
+        entry.update(
+            {
+                "confidence_ratio": result.get("confidence_ratio")
+                if result.get("confidence_ratio") is not None
+                else entry["confidence_ratio"],
+                "sampled_states": result.get("sampled_states"),
+                "search_passes": result.get("search_passes"),
+                "mcts_time_per_state_ms": result.get("search_time_per_state_ms"),
+                "mcts_wall_time_ms": result.get("total_search_time_ms"),
+                "resolved_risk_mode": result.get("risk_mode"),
+            }
+        )
     if policy:
         entry["policy_top"] = [
             {
