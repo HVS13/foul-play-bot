@@ -1,12 +1,19 @@
+import asyncio
+
 from fp.battle.state import Battle
-from fp.config import FoulPlayConfig, _FoulPlayConfig
+from fp.config import FoulPlayConfig, RiskModes, _FoulPlayConfig
 from fp.custom.decisions import SearchResult, analyze_decision
 from fp.custom.demo import build_demo_battle
 from fp.custom.events import EventStore
 from fp.custom.opponent_model import update_opponent_tendencies
 from fp.custom.report import format_text, summarize
-from fp.custom.telemetry import DEFAULT_GUI_SUMMARY_JSON_PATH, _summary_json_path
-from fp.run_battle import _extract_request_json
+from fp.custom.telemetry import (
+    DEFAULT_GUI_SUMMARY_JSON_PATH,
+    _summary_json_path,
+    record_decision,
+)
+from fp.run_battle import _apply_room_rename, _extract_request_json
+from fp.websocket_client import PSWebsocketClient
 
 
 def test_decision_analysis_is_shared_and_deterministic():
@@ -116,6 +123,70 @@ def test_demo_battle_is_usable_by_event_snapshot():
     assert snapshot["battle"]["opponent"]["active"]["name"] == "kingambit"
 
 
+def test_room_rename_updates_transport_and_battle_state(monkeypatch):
+    old_room = "battle-gen9randombattle-123"
+    new_room = old_room + "-hiddenhash"
+    message = ">{}\n|noinit|rename|{}|".format(old_room, new_room)
+
+    client = PSWebsocketClient()
+    client.rooms = {old_room}
+    client.room_aliases = {}
+    client.recent_room_commands = {}
+    assert client.parse_room_rename(message) == (old_room, new_room)
+
+    client.register_room_rename(old_room, new_room)
+    assert client.resolve_room(old_room) == new_room
+    assert old_room not in client.rooms
+    assert new_room in client.rooms
+
+    battle = Battle(old_room)
+    monkeypatch.setattr("fp.run_battle.write_last_battle_tag", lambda _: None)
+    assert _apply_room_rename(client, battle, message) is True
+    assert battle.battle_tag == new_room
+    assert battle.room_rename_count == 1
+
+
+def test_rejected_command_is_retried_in_renamed_room():
+    old_room = "battle-gen9randombattle-123"
+    new_room = old_room + "-hiddenhash"
+    client = PSWebsocketClient()
+    client.rooms = {new_room}
+    client.room_aliases = {old_room: new_room}
+    client.recent_room_commands = {
+        "/choose": (old_room, ["/choose move tackle", "7"])
+    }
+    sent = []
+
+    async def fake_send(room, message_list):
+        sent.append((room, message_list))
+        return True
+
+    client.send_message = fake_send
+    error = "|pm|Bot|~|/error /choose - must be used in a chat room, not a console"
+    assert asyncio.run(client._retry_rejected_room_command(error)) is True
+    assert sent == [(new_room, ["/choose move tackle", "7"])]
+
+
+def test_record_decision_keeps_timer_rqid_and_confidence(monkeypatch):
+    battle = Battle("battle-test-telemetry")
+    battle.rqid = 12
+    battle.turn = 8
+    battle.time_remaining = 27
+    monkeypatch.setattr(FoulPlayConfig, "risk_mode", RiskModes.auto, raising=False)
+
+    entry = record_decision(
+        battle,
+        "protect",
+        150,
+        [("protect", 0.55), ("tackle", 0.45)],
+    )
+
+    assert entry["rqid"] == 12
+    assert entry["time_remaining"] == 27
+    assert entry["configured_risk_mode"] == "auto"
+    assert entry["confidence_ratio"] == 1.2222
+
+
 def test_telemetry_report_surfaces_search_and_confidence():
     report = summarize(
         [
@@ -126,9 +197,13 @@ def test_telemetry_report_surfaces_search_and_confidence():
                 "duration_seconds": 300,
                 "risk_mode": "auto",
                 "reconnect_count": 1,
+                "room_rename_count": 1,
                 "decision_log": [
                     {
                         "search_time_ms": 100,
+                        "time_remaining": 25,
+                        "configured_risk_mode": "auto",
+                        "confidence_ratio": 1.04,
                         "policy_top": [
                             {"move": "a", "weight": 0.5},
                             {"move": "b", "weight": 0.48},
@@ -136,6 +211,8 @@ def test_telemetry_report_surfaces_search_and_confidence():
                     },
                     {
                         "search_time_ms": 300,
+                        "time_remaining": 80,
+                        "configured_risk_mode": "auto",
                         "policy_top": [
                             {"move": "a", "weight": 0.7},
                             {"move": "b", "weight": 0.2},
@@ -151,4 +228,8 @@ def test_telemetry_report_surfaces_search_and_confidence():
     assert report["search_time_ms"]["avg"] == 200.0
     assert report["confidence"]["low_confidence_count"] == 1
     assert report["reconnects"] == 1
+    assert report["room_renames"] == 1
+    assert report["timer_pressure_decisions"] == 1
+    assert report["decision_risk_modes"] == {"auto": 2}
     assert "Low-confidence decisions" in format_text(report)
+    assert "room renames" in format_text(report)
