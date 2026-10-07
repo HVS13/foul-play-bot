@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fp.config import FoulPlayConfig
+from fp.config import BotModes, FoulPlayConfig
 from fp.custom.events import event_snapshot, publish_event
 
 logger = logging.getLogger(__name__)
@@ -30,14 +30,16 @@ class _DashboardHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self._send_bytes(status, "application/json; charset=utf-8", body)
 
-    def _send_asset(self, filename: str) -> None:
+    def _send_asset(
+        self, filename: str, content_type="text/html; charset=utf-8"
+    ) -> None:
         path = _ASSET_DIR / filename
         try:
             body = path.read_bytes()
         except OSError:
             self._send_json({"error": "asset unavailable"}, status=500)
             return
-        self._send_bytes(200, "text/html; charset=utf-8", body)
+        self._send_bytes(200, content_type, body)
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -49,8 +51,47 @@ class _DashboardHandler(BaseHTTPRequestHandler):
             self._send_asset("dashboard.html")
         elif path in {"/overlay", "/overlay.html"}:
             self._send_asset("overlay.html")
+        elif path == "/foul-play.user.js":
+            self._send_asset(
+                "foul-play.user.js", "application/javascript; charset=utf-8"
+            )
         else:
             self._send_json({"error": "not found"}, status=404)
+
+    def do_POST(self):
+        if (
+            urlparse(self.path).path != "/api/browser"
+            or getattr(FoulPlayConfig, "bot_mode", None) != BotModes.browser
+        ):
+            self._send_json({"error": "Browser mode is not enabled"}, status=404)
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_json({"error": "Expected application/json"}, status=415)
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 2 * 1024 * 1024:
+                self._send_json(
+                    {"error": "Snapshot exceeds 2 MiB or is empty"}, status=413
+                )
+                return
+            payload = json.loads(self.rfile.read(length))
+            from fp.custom.browser import BROWSER_SESSION
+
+            response = BROWSER_SESSION.analyze(payload)
+        except BlockingIOError as exc:
+            self._send_json({"error": str(exc)}, status=409)
+            return
+        except (ValueError, KeyError, TypeError) as exc:
+            self._send_json({"error": str(exc)}, status=400)
+            return
+        except Exception:
+            logger.exception("Browser analysis failed")
+            self._send_json(
+                {"error": "Analysis failed; see the local engine log"}, status=500
+            )
+            return
+        self._send_json(response)
 
     def log_message(self, format_string, *args):
         logger.debug("Dashboard: " + format_string, *args)

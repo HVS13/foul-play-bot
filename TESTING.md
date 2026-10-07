@@ -27,6 +27,16 @@ The demo does not log in to Pokémon Showdown and cannot send battle commands.
 
 ## 2. Run a real test session
 
+For the browser companion, run `python run.py --bot-mode browser --pokemon-format gen9randombattle`, install `http://127.0.0.1:8765/foul-play.user.js` with Tampermonkey, and reload Showdown. Join a singles battle. Check a recommendation first in manual mode, then opt into automatic play if desired. Test switching, team preview with `gen9ou`, native manual choices, a changed request during analysis, pause, and engine offline states. Never apply an old result after a manual choice or request change. The local endpoint does not send Showdown actions.
+
+Userscript regression checks without a browser extension:
+
+```bash
+node --check fp/gui/foul-play.user.js
+node --test tests/userscript.test.cjs
+pytest tests/test_browser.py
+```
+
 Example random-battle session:
 
 ```bash

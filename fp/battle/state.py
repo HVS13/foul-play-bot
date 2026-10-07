@@ -122,7 +122,8 @@ class Battle:
         return generation_mechanics(self.generation)
 
     def initialize_team_preview(self, opponent_pokemon, battle_type):
-        self.user.reserve.insert(0, self.user.active)
+        if self.user.active is not None:
+            self.user.reserve.insert(0, self.user.active)
         self.user.active = None
 
         for pkmn_string in opponent_pokemon:

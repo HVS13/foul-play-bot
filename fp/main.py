@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from copy import deepcopy
@@ -44,6 +45,19 @@ async def run_foul_play():
 
     original_pokedex = deepcopy(pokedex)
     original_move_json = deepcopy(all_move_json)
+
+    if FoulPlayConfig.bot_mode == BotModes.browser:
+        logger.info(
+            "Install the userscript at http://127.0.0.1:%s/foul-play.user.js",
+            FoulPlayConfig.gui_port,
+        )
+        try:
+            await asyncio.Event().wait()
+        finally:
+            from fp.custom.dashboard import stop_dashboard
+
+            stop_dashboard()
+        return
 
     ps_websocket_client = await PSWebsocketClient.create(
         FoulPlayConfig.username, FoulPlayConfig.password, FoulPlayConfig.websocket_uri

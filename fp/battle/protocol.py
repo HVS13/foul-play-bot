@@ -89,6 +89,7 @@ def request(battle, split_msg):
         battle_json = json.loads(split_msg[2].strip("'"))
         logger.debug("Received battle JSON from server: {}".format(battle_json))
         battle.rqid = battle_json[constants.RQID]
+        battle.team_preview = bool(battle_json.get("teamPreview"))
 
         if battle_json.get(constants.FORCE_SWITCH):
             battle.force_switch = True
