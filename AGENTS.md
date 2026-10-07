@@ -38,11 +38,13 @@ Do not replace or broadly rewrite upstream search/sampling architecture merely t
   - `telemetry.py`: persistence, summaries, and decision logs.
   - `dashboard.py`: optional local HTTP server.
 - Browser UI: `fp/gui/dashboard.html` and `fp/gui/overlay.html`.
+- Browser companion: `fp/gui/foul-play.user.js`, with read-only local analysis in `fp/custom/browser.py`.
 
 ## Locked design decisions
 - Keep upstream-facing edits thin. Put local-only logic under `fp/custom/` whenever practical.
 - The dashboard consumes events. It must not call or own battle/search logic.
 - The MVP dashboard is read-only. Controls/authentication/remote hosting are deliberately out of scope.
+- The user-requested browser companion may submit choices through Showdown's native browser session. `/api/browser` only analyzes snapshots, is enabled only in `browser` mode, and must bind to `127.0.0.1`. It never logs in or sends Showdown commands from Python. Check room/request identity before applying a result; automatic mode is opt-in per selected battle.
 - The dashboard uses the Python standard library only. Do not add a web framework without a concrete need.
 - The default GUI host is loopback-only (`127.0.0.1`). Treat non-loopback binding as explicitly unsafe unless authentication is added later.
 - Explicit resume and reconnect recovery share one `attach_to_battle()` state-rebuild path.
@@ -91,6 +93,7 @@ Before merging:
 - `ruff format --check --diff`
 - `pytest tests`
 - Any new recovery/search/interface behavior has focused regression coverage.
+- `node --check fp/gui/foul-play.user.js` and `node --test tests/userscript.test.cjs` for companion changes.
 - README and this file reflect user-visible or architectural changes.
 
 ## Updating from upstream

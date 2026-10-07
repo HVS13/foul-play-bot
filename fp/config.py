@@ -14,7 +14,7 @@ from fp.format_spec import FormatSpec
 class CustomFormatter(logging.Formatter):
     def format(self, record):
         lvl = "{}".format(record.levelname)
-        return "{} {}".format(lvl.ljust(8), record.msg)
+        return "{} {}".format(lvl.ljust(8), record.getMessage())
 
 
 class CustomRotatingFileHandler(RotatingFileHandler):
@@ -61,6 +61,7 @@ class BotModes(Enum):
     accept_challenge = auto()
     search_ladder = auto()
     resume_battle = auto()
+    browser = auto()
 
 
 _enum_auto = auto
@@ -293,6 +294,10 @@ class _FoulPlayConfig:
             self.reconnect_backoff_seconds, args.reconnect_max_backoff_seconds
         )
         self.gui = args.gui
+        if self.bot_mode == BotModes.browser:
+            self.gui = True
+            self.suggest_only = True
+            self.battle_timer = "none"
         self.gui_host = args.gui_host
         self.gui_port = args.gui_port
         self.log_level = args.log_level
@@ -327,9 +332,9 @@ class _FoulPlayConfig:
         return FormatSpec.from_format_string(self.pokemon_format)
 
     def validate_config(self):
-        if not self.websocket_uri:
+        if not self.websocket_uri and self.bot_mode != BotModes.browser:
             raise AssertionError("WEBSOCKET_URI is required")
-        if not self.username:
+        if not self.username and self.bot_mode != BotModes.browser:
             raise AssertionError("PS_USERNAME is required")
         if not self.bot_mode:
             raise AssertionError("BOT_MODE is required")
@@ -337,6 +342,8 @@ class _FoulPlayConfig:
             raise AssertionError("POKEMON_FORMAT is required")
         if not 1 <= self.gui_port <= 65535:
             raise AssertionError("GUI_PORT must be between 1 and 65535")
+        if self.bot_mode == BotModes.browser and self.gui_host != "127.0.0.1":
+            raise AssertionError("Browser mode requires GUI_HOST 127.0.0.1")
         if self.bot_mode == BotModes.challenge_user:
             assert (
                 self.user_to_challenge is not None

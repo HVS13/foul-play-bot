@@ -141,6 +141,30 @@ It shows:
 
 The `/overlay` view is intentionally compact and transparent so it can be used as a small browser window or an OBS Browser Source.
 
+### Play directly in the Showdown website
+
+Install [Tampermonkey](https://www.tampermonkey.net/) in your browser, then start the local engine:
+
+```bash
+python run.py --bot-mode browser --pokemon-format gen9randombattle --risk-mode auto
+```
+
+Open [the local userscript installer](http://127.0.0.1:8765/foul-play.user.js) and install **Foul Play Companion**. Reload [Pokémon Showdown](https://play.pokemonshowdown.com/) and start or open a singles battle as a player. If Tampermonkey asks, allow the script to connect to `127.0.0.1`. Follow its browser-specific instructions to enable userscripts.
+
+The companion reads your browser's battle history and private request, sends them to the local Python engine, and displays the recommendation inside Showdown. No second login or password is needed. The existing CLI modes still work as before. Python and poke-engine must remain running; the userscript is not a standalone JavaScript port of the engine.
+
+- **Apply recommendation** submits the selected move, switch, or team-preview choice through the native Showdown client.
+- **Play automatically** is off by default and resets when the selected battle changes or the page reloads.
+- **Pause analysis** stops new analysis and automatic choices. A submitted choice can be undone using Showdown's own controls when permitted.
+- The panel can be minimized and docked left or right. It displays active Pokémon HP, top policy weights, risk mode, relative policy lead, and search time. Policy weights are not win probabilities.
+- Results are tied to the battle room and request; older responses cannot be applied after the request changes or after a manual choice.
+
+Use the same `--pokemon-format` as the battle. For OU, for example, restart the engine with `--pokemon-format gen9ou`. One local engine analyzes one battle at a time. Only singles and the standard Showdown web client (`window.app`) are supported; spectators, doubles, and the experimental rewritten client cannot send companion choices. Engine generation support still depends on the installed poke-engine build.
+
+The browser API runs only in `--bot-mode browser`, binds to `127.0.0.1`, and returns recommendations; it cannot send commands to Showdown. Actions are submitted by the userscript in your existing browser session. Battle history and private team information are sent only to the local engine. To change the port, use `--gui-port` and update **Connection & display** in the panel.
+
+The interface takes inspiration from [Showdex's companion-panel approach](https://github.com/doshidak/showdex), with an independent implementation and no extra UI dependency.
+
 ## Local battle features
 
 ### Attach/resume and reconnect recovery
@@ -307,3 +331,5 @@ pytest tests
 ```
 
 Then push the sync branch, open a PR into `main`, wait for CI, and merge it.
+
+The **Sync upstream** GitHub Actions workflow checks upstream daily at 09:00 Asia/Jakarta and can also be run manually. It creates or updates a tested PR on the reserved `sync/upstream-automatic` branch. Review and merge that PR to update `main`; conflicts or failing checks stop the workflow without changing `main`. Do not use that reserved branch for manual work. Repository Actions settings must allow GitHub Actions to create pull requests. PRs created with `GITHUB_TOKEN` do not trigger a separate PR CI run, so the sync workflow runs the full checks itself before publishing.

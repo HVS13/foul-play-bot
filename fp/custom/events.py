@@ -29,6 +29,7 @@ def _battle_snapshot(battle) -> dict:
         "battle_tag": getattr(battle, "battle_tag", None),
         "format": getattr(battle, "pokemon_format", None),
         "turn": getattr(battle, "turn", 0) or 0,
+        "rqid": getattr(battle, "rqid", None),
         "time_remaining": getattr(battle, "time_remaining", None),
         "wait": bool(getattr(battle, "wait", False)),
         "force_switch": bool(getattr(battle, "force_switch", False)),
@@ -77,6 +78,18 @@ class EventStore:
 
             if battle is not None:
                 self._state["battle"] = _battle_snapshot(battle)
+
+            if event_type in {
+                "battle_started",
+                "battle_attached",
+                "battle_updated",
+                "search_started",
+                "battle_finished",
+                "idle",
+                "connection_lost",
+                "connection_closed",
+            }:
+                self._state["decision"] = None
 
             if event_type in {"connection_open", "reconnected"}:
                 self._state["connection"] = "connected"

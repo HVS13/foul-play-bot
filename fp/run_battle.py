@@ -229,6 +229,8 @@ async def attach_to_battle(
     pokemon_battle_type,
     battle_tag,
     previous_battle=None,
+    choose_move=True,
+    strict_history=False,
 ):
     if not battle_tag:
         raise ValueError("battle_tag is required to attach to a battle")
@@ -313,6 +315,17 @@ async def attach_to_battle(
     battle.rqid = request_json.get(constants.RQID)
     _initialize_resume_datasets(battle, known_names, "\n".join(backlog_msgs))
 
+    # Preview reveals the whole opposing roster, including unplayed Pokemon.
+    opponent_pokemon = []
+    for backlog in backlog_msgs:
+        for line in backlog.split("\n"):
+            parts = line.split("|")
+            if len(parts) >= 4 and parts[1:3] == ["poke", opponent_side]:
+                opponent_pokemon.append(parts[3])
+    if opponent_pokemon:
+        battle.initialize_team_preview(opponent_pokemon, pokemon_battle_type)
+    battle.team_preview = bool(request_json.get("teamPreview"))
+
     history_lines = []
     for backlog in backlog_msgs:
         for line in backlog.split("\n"):
@@ -322,12 +335,15 @@ async def attach_to_battle(
     try:
         process_battle_updates(battle)
     except Exception as exc:
+        if strict_history:
+            raise ValueError("Could not reconstruct battle history") from exc
         logger.warning("Partial history replay while attaching to battle: %s", exc)
         battle.msg_list.clear()
-    try:
-        battle.user.update_from_request_json(request_json)
-    except Exception:
-        battle.user.initialize_first_turn_user_from_json(request_json)
+    if not battle.team_preview:
+        try:
+            battle.user.update_from_request_json(request_json)
+        except Exception:
+            battle.user.initialize_first_turn_user_from_json(request_json)
     battle.started = True
     battle.request_json = request_json
     battle.rqid = request_json.get(constants.RQID)
@@ -349,9 +365,12 @@ async def attach_to_battle(
         await ps_websocket_client.send_message(
             battle.battle_tag, ["/timer {}".format(FoulPlayConfig.battle_timer)]
         )
-    if not battle.wait:
-        best_move = await async_pick_move(battle)
-        await ps_websocket_client.send_message(battle.battle_tag, best_move)
+    if choose_move and not battle.wait:
+        if battle.team_preview:
+            await battle.mode.handle_team_preview(battle, ps_websocket_client)
+        else:
+            best_move = await async_pick_move(battle)
+            await ps_websocket_client.send_message(battle.battle_tag, best_move)
     return battle, None
 
 
