@@ -189,10 +189,8 @@ def select_move_from_mcts_results(
 def get_result_from_mcts(
     state: str, search_time_ms: int, index: int, threads: int
 ) -> MctsResult:
-    logger.debug("Calling with {} state: {}".format(index, state))
     poke_engine_state = PokeEngineState.from_string(state)
     res = monte_carlo_tree_search(poke_engine_state, search_time_ms, threads=threads)
-    logger.info("Iterations {}: {}".format(index, res.total_visits))
     return res
 
 
@@ -202,15 +200,22 @@ def _run_mcts_batch(battles, search_time_ms: int):
         futures = []
         try:
             for index, (battle, chance) in enumerate(battles):
+                state = battle_to_poke_engine_state(battle).to_string()
+                logger.debug("Calling with {} state: {}".format(index, state))
                 future = executor.submit(
                     get_result_from_mcts,
-                    battle_to_poke_engine_state(battle).to_string(),
+                    state,
                     search_time_ms,
                     index,
                     FoulPlayConfig.search_threads,
                 )
                 futures.append((future, chance, index))
-            return [(f.result(), chance, index) for f, chance, index in futures]
+            results = []
+            for future, chance, index in futures:
+                result = future.result()
+                logger.info("Iterations {}: {}".format(index, result.total_visits))
+                results.append((result, chance, index))
+            return results
         except BrokenProcessPool:
             for future, _, _ in futures:
                 future.cancel()
